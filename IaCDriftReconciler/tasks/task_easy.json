@@ -1,0 +1,46 @@
+{
+  "desired_state": {
+    "aws_instance.web": {
+      "resource_type": "aws_instance",
+      "fields": {
+        "instance_type": "t3.medium",
+        "ami": "ami-0c55b159cbfafe1f0"
+      },
+      "managed": true,
+      "dependencies": []
+    },
+    "aws_s3_bucket.logs": {
+      "resource_type": "aws_s3_bucket",
+      "fields": {
+        "versioning_enabled": true,
+        "region": "us-east-1"
+      },
+      "managed": true,
+      "dependencies": []
+    }
+  },
+  "actual_state": {
+    "aws_instance.web": {
+      "resource_type": "aws_instance",
+      "fields": {
+        "instance_type": "t2.micro",
+        "ami": "ami-0c55b159cbfafe1f0"
+      },
+      "managed": true,
+      "dependencies": []
+    },
+    "aws_s3_bucket.logs": {
+      "resource_type": "aws_s3_bucket",
+      "fields": {
+        "versioning_enabled": false,
+        "region": "us-east-1"
+      },
+      "managed": true,
+      "dependencies": []
+    }
+  },
+  "guardrail_constraints": [
+    "aws_instance.web.fields.ami == ami-0c55b159cbfafe1f0",
+    "aws_s3_bucket.logs.fields.region == us-east-1"
+  ]
+}

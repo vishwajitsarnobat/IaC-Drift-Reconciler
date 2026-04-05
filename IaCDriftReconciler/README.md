@@ -303,22 +303,22 @@ python inference.py
 
 ```
 iac-drift-reconciler/
-├── .dockerignore                               # Docker build exclusions
-├── __init__.py                                 # Module exports
-├── README.md                                   # This file
-├── openenv.yaml                                # OpenEnv manifest
-├── pyproject.toml                              # Project metadata and dependencies
-├── uv.lock                                     # Locked dependencies (generated)
-├── inference.py                                # Baseline inference script (OpenAI client)
-├── client.py                                   # IaCDriftReconcilerEnv client
-├── models.py                                   # Action, Observation, DriftItem models
+├── .dockerignore                           # Docker build exclusions
+├── __init__.py                             # Module exports
+├── README.md                               # This file
+├── openenv.yaml                            # OpenEnv manifest
+├── pyproject.toml                          # Project metadata and dependencies
+├── uv.lock                                 # Locked dependencies (generated)
+├── inference.py                            # Baseline inference script (OpenAI client)
+├── client.py                               # IaCDriftReconcilerEnv client
+├── models.py                               # Action, Observation, DriftItem models
 ├── tasks/
-│   ├── task_easy.json                          # Desired + actual state + guardrail constraints
+│   ├── task_easy.json                      # Desired + actual state + guardrail constraints
 │   ├── task_medium.json
 │   └── task_hard.json
+├── Dockerfile                              # Container image definition
 └── server/
-    ├── __init__.py                             # Server module exports
-    ├── ia_cdrift_reconciler_environment.py     # Core environment: step / reset / state / reward
-    ├── app.py                                  # FastAPI + WebSocket endpoints
-    └── Dockerfile                              # Container image definition
+    ├── __init__.py                         # Server module exports
+    ├── ia_cdrift_reconciler_environment.py # Core environment: step / reset / state / reward
+    └── app.py                              # FastAPI + WebSocket endpoints
 ```

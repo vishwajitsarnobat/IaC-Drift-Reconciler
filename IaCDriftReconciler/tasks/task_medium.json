@@ -1,0 +1,48 @@
+{
+  "desired_state": {
+    "aws_security_group.web_sg": {
+      "resource_type": "aws_security_group",
+      "fields": {
+        "ingress_port_22": false,
+        "ingress_port_443": true,
+        "description": "Web security group"
+      },
+      "managed": true,
+      "dependencies": []
+    },
+    "aws_instance.bastion": {
+      "resource_type": "aws_instance",
+      "fields": {
+        "instance_type": "t3.micro",
+        "ami": "ami-0c55b159cbfafe1f0"
+      },
+      "managed": true,
+      "dependencies": []
+    }
+  },
+  "actual_state": {
+    "aws_security_group.web_sg": {
+      "resource_type": "aws_security_group",
+      "fields": {
+        "ingress_port_22": true,
+        "ingress_port_443": true,
+        "description": "Web security group"
+      },
+      "managed": true,
+      "dependencies": []
+    },
+    "aws_instance.bastion": {
+      "resource_type": "aws_instance",
+      "fields": {
+        "instance_type": "t3.micro",
+        "ami": "ami-0c55b159cbfafe1f0"
+      },
+      "managed": false,
+      "dependencies": []
+    }
+  },
+  "guardrail_constraints": [
+    "aws_security_group.web_sg.fields.ingress_port_22 == false",
+    "aws_instance.bastion.managed == true"
+  ]
+}

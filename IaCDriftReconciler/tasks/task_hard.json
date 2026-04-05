@@ -1,0 +1,97 @@
+{
+  "desired_state": {
+    "aws_subnet.main": {
+      "resource_type": "aws_subnet",
+      "fields": {
+        "cidr_block": "10.0.1.0/24",
+        "availability_zone": "us-east-1a"
+      },
+      "managed": true,
+      "dependencies": []
+    },
+    "aws_eip.nat": {
+      "resource_type": "aws_eip",
+      "fields": {
+        "domain": "vpc"
+      },
+      "managed": true,
+      "dependencies": []
+    },
+    "aws_route_table.main": {
+      "resource_type": "aws_route_table",
+      "fields": {
+        "propagating_vgws": false,
+        "tags_name": "main-rt"
+      },
+      "managed": true,
+      "dependencies": ["aws_subnet.main"]
+    },
+    "aws_nat_gateway.main": {
+      "resource_type": "aws_nat_gateway",
+      "fields": {
+        "connectivity_type": "public"
+      },
+      "managed": true,
+      "dependencies": ["aws_subnet.main", "aws_eip.nat"]
+    },
+    "aws_route.default": {
+      "resource_type": "aws_route",
+      "fields": {
+        "destination_cidr": "0.0.0.0/0",
+        "status": "active"
+      },
+      "managed": true,
+      "dependencies": ["aws_nat_gateway.main", "aws_route_table.main"]
+    }
+  },
+  "actual_state": {
+    "aws_subnet.main": {
+      "resource_type": "aws_subnet",
+      "fields": {
+        "cidr_block": "10.0.2.0/24",
+        "availability_zone": "us-east-1a"
+      },
+      "managed": true,
+      "dependencies": []
+    },
+    "aws_eip.nat": {
+      "resource_type": "aws_eip",
+      "fields": {
+        "domain": "standard"
+      },
+      "managed": true,
+      "dependencies": []
+    },
+    "aws_route_table.main": {
+      "resource_type": "aws_route_table",
+      "fields": {
+        "propagating_vgws": true,
+        "tags_name": "main-rt"
+      },
+      "managed": true,
+      "dependencies": ["aws_subnet.main"]
+    },
+    "aws_nat_gateway.main": {
+      "resource_type": "aws_nat_gateway",
+      "fields": {
+        "connectivity_type": "private"
+      },
+      "managed": true,
+      "dependencies": ["aws_subnet.main", "aws_eip.nat"]
+    },
+    "aws_route.default": {
+      "resource_type": "aws_route",
+      "fields": {
+        "destination_cidr": "0.0.0.0/0",
+        "status": "blackhole"
+      },
+      "managed": true,
+      "dependencies": ["aws_nat_gateway.main", "aws_route_table.main"]
+    }
+  },
+  "guardrail_constraints": [
+    "aws_subnet.main.fields.cidr_block != 10.0.0.0/8",
+    "aws_nat_gateway.main.fields.connectivity_type == public",
+    "aws_route.default.fields.status == active"
+  ]
+}
