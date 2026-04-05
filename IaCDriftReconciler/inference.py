@@ -1,30 +1,19 @@
 """
-IaC Drift Reconciler — Baseline Inference Script.
+IaC Drift Reconciler — Baseline Inference Script
+=================================================
 
-Runs a full episode for each of the three task IDs using an LLM as the agent.
-The LLM is called via the OpenAI-compatible chat completions API.
+MANDATORY env vars:
+  API_BASE_URL     LLM endpoint  (default: https://router.huggingface.co/v1)
+  MODEL_NAME       Model id      (default: Qwen/Qwen2.5-72B-Instruct)
+  HF_TOKEN         HF / API key
+  ENV_BASE_URL     Running env server (default: http://localhost:8000)
 
-Environment variables (required)
----------------------------------
-  API_BASE_URL   OpenAI-compatible endpoint, e.g. https://api.openai.com/v1
-  MODEL_NAME     Model identifier, e.g. gpt-4o or meta-llama/Llama-3-70b-instruct
-  HF_TOKEN       Hugging Face token (used as the API key when hitting HF endpoints)
+STDOUT FORMAT  (evaluator parses these — do not change):
+  [START] task=<task_id> env=IaCDriftReconciler model=<model>
+  [STEP]  step=<n> action=<str> reward=<0.00> done=<true|false> error=<msg|null>
+  [END]   success=<true|false> steps=<n> score=<0.000> rewards=<r1,r2,...>
 
-Optional
---------
-  ENV_BASE_URL   Running environment server (default: http://localhost:8000)
-  MAX_STEPS      Episode step cap override  (default: 30)
-
-Log format (stdout, one JSON per line)
----------------------------------------
-  [START]  {"marker": "[START]", "task_id": ..., "model": ..., "episode": ...}
-  [STEP]   {"marker": "[STEP]",  "task_id": ..., "step": ..., "action_type": ...,
-             "reward": ..., "drift_score": ..., "done": ...}
-  [END]    {"marker": "[END]",   "task_id": ..., "model": ...,
-             "score": ..., "steps_taken": ..., "status": ...}
-
-The evaluator parses these lines — any deviation breaks scoring.
-All debug / error output goes to stderr.
+All debug output goes to stderr.
 """
 
 from __future__ import annotations
@@ -32,131 +21,153 @@ from __future__ import annotations
 import json
 import os
 import sys
-import time
-from typing import Any, Dict, Optional
+import textwrap
+from typing import List, Optional
 
-# ── Third-party ────────────────────────────────────────────────────────────
 from openai import OpenAI
 
-# ── Environment client + models ────────────────────────────────────────────
-# Support both `python inference.py` (from the IaCDriftReconciler/ directory)
-# and `python IaCDriftReconciler/inference.py` (from repo root).
+# ── env client & models ────────────────────────────────────────────────────
 try:
     from IaCDriftReconciler.client import IaCDriftReconcilerEnv
     from IaCDriftReconciler.models import IaCDriftReconcilerAction, IaCDriftReconcilerObservation
 except ImportError:
-    sys.path.insert(0, os.path.dirname(__file__))
-    from client import IaCDriftReconcilerEnv  # type: ignore[no-redef]
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from client import IaCDriftReconcilerEnv          # type: ignore[no-redef]
     from models import IaCDriftReconcilerAction, IaCDriftReconcilerObservation  # type: ignore[no-redef]
 
 # ---------------------------------------------------------------------------
-# Configuration — read once at import time
+# Configuration
 # ---------------------------------------------------------------------------
 
-API_BASE_URL: str = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME:   str = os.environ.get("MODEL_NAME", "gpt-4o")
-HF_TOKEN:     str = os.environ.get("HF_TOKEN", "")
-ENV_BASE_URL: str = os.environ.get("ENV_BASE_URL", "http://localhost:8000")
-MAX_STEPS:    int = int(os.environ.get("MAX_STEPS", "30"))
+API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
+MODEL_NAME   = os.getenv("MODEL_NAME")   or "Qwen/Qwen2.5-72B-Instruct"
+HF_TOKEN     = os.getenv("HF_TOKEN")     or os.getenv("API_KEY") or ""
+ENV_BASE_URL = os.getenv("ENV_BASE_URL") or "http://localhost:8000"
+MAX_STEPS    = int(os.getenv("MAX_STEPS", "30"))
 
-TASK_IDS = ["easy", "medium", "hard"]
+BENCHMARK = "IaCDriftReconciler"
+TASK_IDS  = ["easy", "medium", "hard"]
 
-# ---------------------------------------------------------------------------
-# OpenAI client (OpenAI-compatible)
-# ---------------------------------------------------------------------------
-
-llm = OpenAI(
-    base_url=API_BASE_URL,
-    api_key=HF_TOKEN or "placeholder",   # HF Inference API uses the token as key
-)
+SUCCESS_SCORE_THRESHOLD = 0.99   # drift_score == 0.0 ↔ score == 1.0
 
 # ---------------------------------------------------------------------------
-# Logging helpers — all structured output goes to stdout, debug to stderr
+# OpenAI-compatible client (HF Router uses the same API surface)
 # ---------------------------------------------------------------------------
 
-def _log(record: Dict[str, Any]) -> None:
-    """Emit one JSON log line to stdout (evaluator-facing)."""
-    print(json.dumps(record), flush=True)
+llm = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN or "placeholder")
+
+# ---------------------------------------------------------------------------
+# Stdout log helpers  (exact format the evaluator parses)
+# ---------------------------------------------------------------------------
+
+def log_start(task: str, model: str) -> None:
+    print(f"[START] task={task} env={BENCHMARK} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_val = error if error else "null"
+    done_val  = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} "
+        f"done={done_val} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} "
+        f"score={score:.3f} rewards={rewards_str}",
+        flush=True,
+    )
 
 
 def _debug(msg: str) -> None:
-    """Emit a human-readable debug line to stderr (not parsed by evaluator)."""
     print(f"[debug] {msg}", file=sys.stderr, flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Compact action string for [STEP] log
+# ---------------------------------------------------------------------------
+
+def _action_str(action: IaCDriftReconcilerAction) -> str:
+    """Return a short, evaluator-safe single-line representation of the action."""
+    t = action.action_type
+    if t == "update_resource":
+        return f"update_resource({action.resource_name},{action.attribute},{action.new_value})"
+    if t == "create_missing_resource":
+        return f"create_missing_resource({action.resource_name})"
+    if t == "delete_extra_resource":
+        return f"delete_extra_resource({action.resource_name})"
+    if t in ("attach_volume", "detach_volume"):
+        return f"{t}({action.instance_name},{action.volume_name})"
+    return "no_op()"
 
 
 # ---------------------------------------------------------------------------
 # Prompt construction
 # ---------------------------------------------------------------------------
 
-_ACTION_SCHEMA = {
-    "action_type": "one of: update_resource | create_missing_resource | delete_extra_resource | attach_volume | detach_volume | no_op",
-    "resource_name": "(str) required for: update_resource, create_missing_resource, delete_extra_resource",
-    "attribute":     "(str) required for: update_resource — the field name to change",
-    "new_value":     "(str) required for: update_resource — the new value (always as a string)",
-    "resource_type": "(str) required for: create_missing_resource",
-    "properties":    "(str) required for: create_missing_resource — JSON-encoded dict of fields",
-    "instance_name": "(str) required for: attach_volume, detach_volume",
-    "volume_name":   "(str) required for: attach_volume, detach_volume",
-}
+_ACTION_SCHEMA = textwrap.dedent("""\
+    {"action_type": "update_resource",          "resource_name": "...", "attribute": "...", "new_value": "..."}
+    {"action_type": "create_missing_resource",  "resource_type": "...", "resource_name": "...", "properties": "{...}"}
+    {"action_type": "delete_extra_resource",    "resource_name": "..."}
+    {"action_type": "attach_volume",            "instance_name": "...", "volume_name": "..."}
+    {"action_type": "detach_volume",            "instance_name": "...", "volume_name": "..."}
+    {"action_type": "no_op"}""")
 
-def _build_system_prompt() -> str:
-    return (
-        "You are an infrastructure reconciliation agent.\n"
-        "Your job is to fix drifted infrastructure by submitting exactly ONE action per turn.\n\n"
-        "RULES:\n"
-        "1. You MUST respond with a single valid JSON object — no markdown, no explanation.\n"
-        "2. The JSON must match the IaCDriftReconcilerAction schema below.\n"
-        "3. Only include the fields required for the chosen action_type.\n"
-        "4. Do NOT violate any guardrail constraint. Constraints are hard rules: "
-        "   violating one ends the episode immediately with reward = -1.0.\n"
-        "5. For create_missing_resource, encode 'properties' as a JSON string of the fields dict.\n"
-        "6. If you are unsure, emit {\"action_type\": \"no_op\"}.\n\n"
-        f"ACTION SCHEMA:\n{json.dumps(_ACTION_SCHEMA, indent=2)}\n\n"
-        "EXAMPLE RESPONSES:\n"
-        '  {"action_type": "update_resource", "resource_name": "aws_instance.web", '
-        '"attribute": "instance_type", "new_value": "t3.medium"}\n'
-        '  {"action_type": "delete_extra_resource", "resource_name": "aws_security_group.legacy"}\n'
-        '  {"action_type": "no_op"}'
-    )
+SYSTEM_PROMPT = textwrap.dedent(f"""\
+    You are an infrastructure reconciliation agent.
+    Your goal is to fix drifted cloud resources by choosing ONE action per turn.
+
+    RULES:
+    1. Respond with a single valid JSON object — no markdown fences, no prose.
+    2. Use only the action_type values below. Include only fields required for that type.
+    3. new_value must always be a string (e.g. "true", "false", "t3.medium").
+    4. NEVER violate a guardrail constraint — that ends the episode with reward = -1.0.
+    5. For create_missing_resource, encode properties as a JSON string of the fields dict.
+    6. If uncertain, emit: {{"action_type": "no_op"}}
+
+    ACTION SCHEMAS (one per line):
+    {_ACTION_SCHEMA}
+
+    EXAMPLES:
+    {{"action_type": "update_resource", "resource_name": "aws_instance.web", "attribute": "instance_type", "new_value": "t3.medium"}}
+    {{"action_type": "delete_extra_resource", "resource_name": "aws_security_group.old"}}
+    {{"action_type": "no_op"}}""")
 
 
-def _build_user_prompt(obs: IaCDriftReconcilerObservation) -> str:
-    drift_lines = []
-    for item in obs.drift_items:
-        drift_lines.append(
-            f"  - {item.resource_id}.{item.field}: "
-            f"actual={item.actual_value!r} → desired={item.desired_value!r} "
-            f"[severity={item.severity}]"
-        )
+def _build_user_prompt(obs: IaCDriftReconcilerObservation, step: int) -> str:
+    drift_lines = "\n".join(
+        f"  {i+1}. {d.resource_id}.{d.field}: "
+        f"actual={d.actual_value!r} → desired={d.desired_value!r} [{d.severity}]"
+        for i, d in enumerate(obs.drift_items)
+    ) or "  (none — fully reconciled)"
 
-    drift_section = "\n".join(drift_lines) if drift_lines else "  (none — fully reconciled)"
+    guardrail_lines = "\n".join(
+        f"  - {r}" for r in obs.holy_grail_rules
+    ) or "  (none)"
 
-    guardrail_section = (
-        "\n".join(f"  - {r}" for r in obs.holy_grail_rules)
-        if obs.holy_grail_rules
-        else "  (none)"
-    )
+    return textwrap.dedent(f"""\
+        STEP {step} | drift_score={obs.drift_score:.4f} | remaining_drifts={len(obs.drift_items)}
 
-    return (
-        f"STEP {obs.step_count} | drift_score={obs.drift_score:.4f} | done={obs.done}\n\n"
-        f"REMAINING DRIFT ({len(obs.drift_items)} items):\n{drift_section}\n\n"
-        f"GUARDRAIL CONSTRAINTS (never violate these):\n{guardrail_section}\n\n"
-        "Submit your next action as a JSON object and nothing else."
-    )
+        DRIFT ITEMS TO FIX:
+        {drift_lines}
+
+        GUARDRAIL CONSTRAINTS (never violate):
+        {guardrail_lines}
+
+        Respond with exactly one JSON action object.""")
 
 
 # ---------------------------------------------------------------------------
-# LLM call + action parsing
+# LLM call
 # ---------------------------------------------------------------------------
 
-def _call_llm(
-    system_prompt: str,
-    user_prompt: str,
-    conversation_history: list,
-) -> str:
-    """Call the LLM and return the raw text response."""
+def _call_llm(user_prompt: str, conversation_history: list) -> str:
     messages = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": SYSTEM_PROMPT},
         *conversation_history,
         {"role": "user", "content": user_prompt},
     ]
@@ -165,141 +176,100 @@ def _call_llm(
         messages=messages,
         temperature=0.0,
         max_tokens=256,
+        stream=False,
     )
-    return response.choices[0].message.content.strip()
+    return (response.choices[0].message.content or "").strip()
 
 
-def _parse_action(raw_text: str) -> Optional[IaCDriftReconcilerAction]:
-    """Parse LLM output into an IaCDriftReconcilerAction.  Returns None on failure."""
-    # Strip markdown code fences if present
-    text = raw_text.strip()
+def _parse_action(raw: str) -> IaCDriftReconcilerAction:
+    text = raw.strip()
+    # Strip markdown fences if model wraps in ```json ... ```
     if text.startswith("```"):
         lines = text.splitlines()
-        # Remove opening fence (```json or ```) and closing fence
-        inner = [l for l in lines[1:] if not l.strip().startswith("```")]
-        text = "\n".join(inner).strip()
-
-    data = json.loads(text)   # raises ValueError / json.JSONDecodeError on failure
+        text = "\n".join(l for l in lines[1:] if not l.strip().startswith("```")).strip()
+    data = json.loads(text)
     return IaCDriftReconcilerAction(**data)
-
-
-def _fallback_action() -> IaCDriftReconcilerAction:
-    return IaCDriftReconcilerAction(action_type="no_op")
 
 
 # ---------------------------------------------------------------------------
 # Episode runner
 # ---------------------------------------------------------------------------
 
-def run_episode(
-    env: IaCDriftReconcilerEnv,
-    task_id: str,
-    system_prompt: str,
-) -> Dict[str, Any]:
-    """Run one full episode for *task_id*.
-
-    Returns a summary dict with keys: task_id, score, steps_taken, status.
-    """
-    _debug(f"Starting episode for task_id={task_id!r}")
-
-    # reset
+def run_episode(env, task_id: str) -> dict:
+    """Run one full episode; returns summary dict."""
     result = env.reset(task_id=task_id)
     obs: IaCDriftReconcilerObservation = result.observation
 
-    _log({
-        "marker": "[START]",
-        "task_id": task_id,
-        "model": MODEL_NAME,
-        "episode": obs.metadata.get("episode_id", "unknown"),
-        "initial_drift_score": obs.drift_score,
-        "num_drift_items": len(obs.drift_items),
-        "guardrail_count": len(obs.holy_grail_rules),
-        "timestamp": time.time(),
-    })
+    log_start(task=task_id, model=MODEL_NAME)
 
+    rewards:  List[float] = []
     conversation_history: list = []
-    total_reward = 0.0
-    steps_taken  = 0
-    status       = "timeout"
+    steps_taken = 0
+    success     = False
+    score       = 0.0
 
-    for step_num in range(1, MAX_STEPS + 1):
-        if obs.done:
-            break
+    try:
+        for step in range(1, MAX_STEPS + 1):
+            if obs.done:
+                break
 
-        user_prompt = _build_user_prompt(obs)
+            user_prompt = _build_user_prompt(obs, step)
+            raw_text    = ""
+            action: IaCDriftReconcilerAction
+            error_msg: Optional[str] = None
 
-        # ── LLM call with fallback ─────────────────────────────────────
-        raw_text = ""
-        action: IaCDriftReconcilerAction
-        try:
-            raw_text = _call_llm(system_prompt, user_prompt, conversation_history)
-            action = _parse_action(raw_text)
-            _debug(f"  step {step_num}: LLM → {action.action_type}")
-        except Exception as exc:
-            _debug(f"  step {step_num}: parse/call error ({exc!r}) → no_op fallback")
-            action = _fallback_action()
-            raw_text = raw_text or "<error>"
+            try:
+                raw_text = _call_llm(user_prompt, conversation_history)
+                action   = _parse_action(raw_text)
+                _debug(f"  step {step}: {_action_str(action)}")
+            except Exception as exc:
+                _debug(f"  step {step}: parse/call error ({exc!r}) → no_op fallback")
+                action    = IaCDriftReconcilerAction(action_type="no_op")
+                error_msg = str(exc)[:120]
+                raw_text  = raw_text or "<error>"
 
-        # Append to conversation so the model has context across steps
-        conversation_history.append({"role": "user",      "content": user_prompt})
-        conversation_history.append({"role": "assistant", "content": raw_text})
+            # Append to history so the model has sequential context
+            conversation_history.append({"role": "user",      "content": user_prompt})
+            conversation_history.append({"role": "assistant", "content": raw_text})
 
-        # ── Environment step ───────────────────────────────────────────
-        result = env.step(action)
-        obs    = result.observation
-        reward = result.reward if result.reward is not None else obs.metadata.get("reward", 0.0)
+            # Step the environment
+            result = env.step(action)
+            obs    = result.observation
+            reward = float(
+                result.reward
+                if result.reward is not None
+                else obs.metadata.get("reward", 0.0)
+            )
 
-        total_reward += reward
-        steps_taken   = step_num
-
-        _log({
-            "marker":      "[STEP]",
-            "task_id":     task_id,
-            "step":        step_num,
-            "action_type": action.action_type,
-            "resource":    (
-                action.resource_name
-                or action.instance_name
-                or None
-            ),
-            "reward":         round(float(reward), 4),
-            "drift_score":    round(float(obs.drift_score), 4),
-            "done":           obs.done,
-            "valid":          obs.metadata.get("last_action_valid", True),
-            "guardrail_hit":  obs.metadata.get("guardrail_violated", False),
-            "timestamp":      time.time(),
-        })
-
-        if obs.done:
+            done = obs.done
+            if not obs.metadata.get("last_action_valid", True):
+                error_msg = obs.metadata.get("error", error_msg)
             if obs.metadata.get("guardrail_violated"):
-                status = "guardrail_violation"
-            elif obs.drift_score == 0.0:
-                status = "success"
-            else:
-                status = "max_steps"
-            break
+                error_msg = f"guardrail_violated: {obs.metadata.get('violated_rule', '')}"
 
-    # Final score = 1 - remaining drift_score (higher is better)
-    final_score = round(1.0 - float(obs.drift_score), 4)
+            rewards.append(reward)
+            steps_taken = step
 
-    _log({
-        "marker":      "[END]",
-        "task_id":     task_id,
-        "model":       MODEL_NAME,
-        "score":       final_score,
-        "steps_taken": steps_taken,
-        "total_reward": round(float(total_reward), 4),
-        "final_drift_score": round(float(obs.drift_score), 4),
-        "status":      status,
-        "timestamp":   time.time(),
-    })
+            log_step(
+                step=step,
+                action=_action_str(action),
+                reward=reward,
+                done=done,
+                error=error_msg,
+            )
 
-    return {
-        "task_id":     task_id,
-        "score":       final_score,
-        "steps_taken": steps_taken,
-        "status":      status,
-    }
+            if done:
+                break
+
+        # Score = 1 - remaining drift (1.0 = fully reconciled)
+        score   = round(1.0 - float(obs.drift_score), 3)
+        success = score >= SUCCESS_SCORE_THRESHOLD
+
+    finally:
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
+    return {"task_id": task_id, "score": score, "steps_taken": steps_taken,
+            "success": success}
 
 
 # ---------------------------------------------------------------------------
@@ -310,50 +280,35 @@ def main() -> None:
     _debug(f"API_BASE_URL = {API_BASE_URL}")
     _debug(f"MODEL_NAME   = {MODEL_NAME}")
     _debug(f"ENV_BASE_URL = {ENV_BASE_URL}")
+    if not HF_TOKEN:
+        _debug("WARNING: HF_TOKEN not set — requests will likely fail with 401.")
 
-    if not HF_TOKEN and "openai.com" not in API_BASE_URL:
-        _debug("WARNING: HF_TOKEN is not set. Requests may fail if the endpoint requires auth.")
-
-    system_prompt = _build_system_prompt()
     results = []
-
     env = IaCDriftReconcilerEnv(base_url=ENV_BASE_URL)
 
     with env.sync() as sync_env:
         for task_id in TASK_IDS:
             try:
-                summary = run_episode(sync_env, task_id, system_prompt)
+                summary = run_episode(sync_env, task_id)
                 results.append(summary)
             except Exception as exc:
-                _debug(f"Episode failed for task_id={task_id!r}: {exc!r}")
-                _log({
-                    "marker":      "[END]",
-                    "task_id":     task_id,
-                    "model":       MODEL_NAME,
-                    "score":       0.0,
-                    "steps_taken": 0,
-                    "status":      "error",
-                    "error":       str(exc),
-                    "timestamp":   time.time(),
-                })
-                results.append({
-                    "task_id": task_id,
-                    "score":   0.0,
-                    "steps_taken": 0,
-                    "status":  "error",
-                })
+                _debug(f"Episode crashed for task_id={task_id!r}: {exc!r}")
+                log_end(success=False, steps=0, score=0.0, rewards=[])
+                results.append({"task_id": task_id, "score": 0.0,
+                                 "steps_taken": 0, "success": False})
 
-    # ── Results table to stderr (human-readable, not parsed by evaluator) ──
-    print("\n" + "=" * 56, file=sys.stderr)
-    print(f"  {'task_id':<10} {'model':<20} {'score':>6} {'steps':>6}  status", file=sys.stderr)
-    print("=" * 56, file=sys.stderr)
+    # Human-readable summary to stderr only
+    print("\n" + "=" * 60, file=sys.stderr)
+    print(f"  {'task':<10} {'model':<30} {'score':>6} {'steps':>6}",
+          file=sys.stderr)
+    print("=" * 60, file=sys.stderr)
     for r in results:
         print(
-            f"  {r['task_id']:<10} {MODEL_NAME:<20} {r['score']:>6.4f} "
-            f"{r['steps_taken']:>6}  {r['status']}",
+            f"  {r['task_id']:<10} {MODEL_NAME:<30} "
+            f"{r['score']:>6.3f} {r['steps_taken']:>6}",
             file=sys.stderr,
         )
-    print("=" * 56, file=sys.stderr)
+    print("=" * 60, file=sys.stderr)
 
 
 if __name__ == "__main__":

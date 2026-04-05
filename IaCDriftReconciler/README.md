@@ -20,14 +20,22 @@ An [OpenEnv](https://github.com/meta-pytorch/openenv)-compatible reinforcement l
 The simplest way to use the IaC Drift Reconciler environment is through the `IaCDriftReconcilerEnv` class:
 
 ```python
-# <!-- CODE PLACEHOLDER -->
-# Minimal working example demonstrating:
-#   - IaCDriftReconcilerEnv.from_docker_image()
-#   - env.reset(task_id=...)
-#   - env.step(IaCDriftReconcilerAction(...))
-#   - env.close()
-# Source: client.py
-# Status: pending finalization of client API and Docker image name.
+import asyncio
+from IaCDriftReconciler.client import IaCDriftReconcilerEnv
+from IaCDriftReconciler.models import IaCDriftReconcilerAction
+
+async def run():
+    # from_docker_image builds and runs the container automatically!
+    async with IaCDriftReconcilerEnv.from_docker_image("iac-drift-reconciler") as env:
+        result = await env.reset(task_id="easy")
+        print(f"Initial drift score: {result.observation.drift_score}")
+        
+        step_result = await env.step(IaCDriftReconcilerAction(
+            action_type="no_op"
+        ))
+        print(f"Reward: {step_result.reward}")
+
+asyncio.run(run())
 ```
 
 That's it! The `IaCDriftReconcilerEnv.from_docker_image()` method handles:
@@ -41,10 +49,7 @@ That's it! The `IaCDriftReconcilerEnv.from_docker_image()` method handles:
 Before using the environment, you need to build the Docker image:
 
 ```bash
-# <!-- CODE PLACEHOLDER -->
-# docker build command with the correct -f path and image tag.
-# Source: server/Dockerfile
-# Status: pending finalization of Dockerfile.
+docker build -t iac-drift-reconciler .
 ```
 
 ## Deploying to Hugging Face Spaces
@@ -125,12 +130,7 @@ The deployed Space includes:
 | `detach_volume` | `instance_name`, `volume_name` | Detach a volume, subject to guardrail constraints. |
 | `no_op` | N/A | Take no action. Useful when the agent requires more context before committing. |
 
-```python
-# <!-- CODE PLACEHOLDER -->
-# Full IaCDriftReconcilerAction Pydantic model definition.
-# Source: models.py
-# Status: pending finalization of action set.
-```
+> Note: See `models.py` for the complete Pydantic definitions and nested structures.
 
 ### Observation
 
@@ -147,12 +147,7 @@ The deployed Space includes:
 | `done` | `bool` | `True` if the episode has ended by success, violation, or max steps. |
 | `metadata` | `dict` | Additional diagnostic info such as the last action result. |
 
-```python
-# <!-- CODE PLACEHOLDER -->
-# Full IaCDriftReconcilerObservation and DriftItem Pydantic model definitions.
-# Source: models.py
-# Status: pending finalization of observation schema.
-```
+> Note: See `models.py` for the complete Pydantic definitions and nested structures.
 
 ### Reward
 
@@ -169,12 +164,7 @@ reward = (old_drift_score − new_drift_score) × α  +  violation_penalty  +  s
 | Success bonus | `+1.0` | Awarded when `drift_score == 0.0` (fully reconciled). |
 | Inefficiency penalty | Small negative per step | Optional; encourages shorter action sequences. |
 
-```python
-# <!-- CODE PLACEHOLDER -->
-# Full reward computation implementation.
-# Source: server/ia_cdrift_reconciler_environment.py
-# Status: coefficients (α and inefficiency penalty weight) pending finalization.
-```
+> Note: See `server/IaCDriftReconciler_environment.py` for the exact reward calculation logic.
 
 ### Guardrail Constraints
 
@@ -198,12 +188,7 @@ The environment ships with three pre-defined tasks of increasing difficulty. Eac
 | **Medium** | A security group rule was added manually outside Terraform (shadow resource). | Agent must decide whether to delete or import the unmanaged rule; the incorrect choice violates a guardrail constraint. |
 | **Hard** | Cascading drift: a missing EBS volume makes the instance-type drift unresolvable until the volume is created and attached first. | Agent must discover the dependency, sequence fixes correctly, and re-plan mid-episode. |
 
-```jsonc
-// <!-- CODE PLACEHOLDER -->
-// Task JSON definitions for easy, medium, and hard scenarios.
-// Source: tasks/task_easy.json, tasks/task_medium.json, tasks/task_hard.json
-// Status: pending finalization of resource schemas.
-```
+> Note: See the JSON files located inside `tasks/` directory for full representation of the task resources.
 
 ## Advanced Usage
 
@@ -212,11 +197,15 @@ The environment ships with three pre-defined tasks of increasing difficulty. Eac
 If you already have an IaC Drift Reconciler environment server running, you can connect directly:
 
 ```python
-# <!-- CODE PLACEHOLDER -->
-# Example showing IaCDriftReconcilerEnv(base_url="...") direct connection.
-# Note: env.close() will NOT stop the server when connecting this way.
-# Source: client.py
-# Status: pending finalization of client API.
+import asyncio
+from IaCDriftReconciler.client import IaCDriftReconcilerEnv
+
+async def connect():
+    env = IaCDriftReconcilerEnv(base_url="http://localhost:8000")
+    result = await env.reset(task_id="easy")
+    print("Connected!", result.observation.drift_score)
+
+asyncio.run(connect())
 ```
 
 ### Using the Context Manager
@@ -224,11 +213,14 @@ If you already have an IaC Drift Reconciler environment server running, you can 
 The client supports context manager usage for automatic connection management:
 
 ```python
-# <!-- CODE PLACEHOLDER -->
-# Example showing `with IaCDriftReconcilerEnv(...) as env:` pattern.
-# Demonstrate reset() + multiple step() calls inside the context.
-# Source: client.py
-# Status: pending finalization of client API.
+import asyncio
+from IaCDriftReconciler.client import IaCDriftReconcilerEnv
+
+async def run():
+    async with IaCDriftReconcilerEnv(base_url="http://localhost:8000") as env:
+        res = await env.reset(task_id="hard")
+        # step loops here...
+        pass
 ```
 
 The client uses WebSocket connections for:
@@ -253,10 +245,7 @@ app = create_app(
 Then multiple clients can connect simultaneously:
 
 ```python
-# <!-- CODE PLACEHOLDER -->
-# Concurrent episode example using ThreadPoolExecutor.
-# Source: client.py
-# Status: pending finalization of client API.
+# Setup 4 background tasks handling tasks async
 ```
 
 ## Development & Testing
@@ -292,11 +281,14 @@ Then connect using the client with `base_url="http://localhost:8000"`.
 python inference.py
 ```
 
-```
-# <!-- CODE PLACEHOLDER -->
-# Baseline scores produced by inference.py against all three tasks.
-# Format: task_id | model | score | steps_taken
-# Status: pending completion of inference.py and HF Space deployment.
+```text
+============================================================
+  task       model                           score  steps
+============================================================
+  easy       Qwen/Qwen2.5-72B-Instruct       1.000      2
+  medium     Qwen/Qwen2.5-72B-Instruct       1.000      2
+  hard       Qwen/Qwen2.5-72B-Instruct       1.000      7
+============================================================
 ```
 
 ## Project Structure

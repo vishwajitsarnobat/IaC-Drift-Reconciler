@@ -1,0 +1,16 @@
+(openenv-iacdriftreconciler) ➜  IaCDriftReconciler git:(main) ✗ openenv push
+Validating OpenEnv environment in 
+/home/vishwajit/Workspace/IaC-Drift-Reconciler/IaCDriftReconciler...
+⚠ Recommended directory missing: outputs/
+✓ Found OpenEnv environment: IaCDriftReconciler
+✓ Authenticated as: vishwajitsarnobat
+Preparing files for Hugging Face deployment (with web interface)...
+✓ Updated Dockerfile: enabled web interface
+Creating/verifying space: vishwajitsarnobat/IaCDriftReconciler
+✓ Space vishwajitsarnobat/IaCDriftReconciler is ready
+Uploading files to vishwajitsarnobat/IaCDriftReconciler...
+✓ Upload completed successfully
+Space URL: https://huggingface.co/spaces/vishwajitsarnobat/IaCDriftReconciler
+
+✓ Deployment complete!
+Visit your space at: https://huggingface.co/spaces/vishwajitsarnobat/IaCDriftReconciler

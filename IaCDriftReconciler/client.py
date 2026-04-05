@@ -148,9 +148,16 @@ class IaCDriftReconcilerEnv(
             metadata=obs_data.get("metadata", {}),
         )
 
+        # Reward: prefer top-level field; fall back to observation.metadata["reward"]
+        # (the environment stores it there when the WebSocket server doesn't hoist it)
+        metadata = obs_data.get("metadata", {})
+        raw_reward = payload.get("reward")
+        if raw_reward is None:
+            raw_reward = metadata.get("reward")
+
         return StepResult(
             observation=observation,
-            reward=payload.get("reward"),
+            reward=raw_reward,
             done=bool(payload.get("done", obs_data.get("done", False))),
         )
 

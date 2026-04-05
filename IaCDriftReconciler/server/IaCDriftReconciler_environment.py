@@ -51,6 +51,11 @@ try:
         IaCDriftReconcilerObservation,
     )
 except ImportError:
+    # Running as a standalone script (uv run server/... or python server/...)
+    # Insert the package root (IaCDriftReconciler/) so 'models' is importable.
+    import sys as _sys
+    import os as _os
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
     from models import (  # type: ignore[no-redef]
         DriftItem,
         IaCDriftReconcilerAction,
@@ -670,6 +675,7 @@ class IaCDriftReconcilerEnvironment(Environment):
             holy_grail_rules=list(self.guardrail_constraints),
             step_count=self.step_count,
             done=done,
+            reward=metadata.get("reward"),
             metadata=metadata,
         )
 
