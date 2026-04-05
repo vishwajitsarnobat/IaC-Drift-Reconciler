@@ -1,78 +1,95 @@
 """
-FastAPI application for the Iacdriftreconciler Environment.
+FastAPI application for the IaC Drift Reconciler Environment.
 
-This module creates an HTTP server that exposes the IacdriftreconcilerEnvironment
-over HTTP and WebSocket endpoints, compatible with EnvClient.
+The OpenEnv create_app factory generates these endpoints automatically:
+    POST /reset          Reset the environment (accepts task_id in body)
+    POST /step           Execute an action
+    GET  /state          Get current episode state
+    GET  /schema         Action / observation JSON schemas
+    WS   /ws             Persistent WebSocket session
 
-Endpoints:
-    - POST /reset: Reset the environment
-    - POST /step: Execute an action
-    - GET /state: Get current environment state
-    - GET /schema: Get action/observation schemas
-    - WS /ws: WebSocket endpoint for persistent sessions
+One custom route is added manually:
+    GET  /tasks          List available task IDs (required by the validator)
 
-Usage:
-    # Development (with auto-reload):
+Usage
+-----
+Development (auto-reload):
     uvicorn server.app:app --reload --host 0.0.0.0 --port 8000
 
-    # Production:
-    uvicorn server.app:app --host 0.0.0.0 --port 8000 --workers 4
+Production:
+    uvicorn server.app:app --host 0.0.0.0 --port 8000
 
-    # Or run directly:
+Direct execution:
     python -m server.app
 """
 
+from __future__ import annotations
+
+from typing import List
+
+# ── OpenEnv factory ────────────────────────────────────────────────────────
 try:
-    from openenv.core.env_server.http_server import create_app
-except Exception as e:  # pragma: no cover
-    raise ImportError(
-        "openenv is required for the web interface. Install dependencies with '\n    uv sync\n'"
-    ) from e
+    from openenv import create_app  # preferred short import
+except ImportError:
+    from openenv.core.env_server.http_server import create_app  # type: ignore[no-redef]
 
+# ── Local imports (relative when run as a package, absolute as __main__) ───
 try:
-    from ..models import IacdriftreconcilerAction, IacdriftreconcilerObservation
-    from .IaCDriftReconciler_environment import IacdriftreconcilerEnvironment
-except ModuleNotFoundError:
-    from models import IacdriftreconcilerAction, IacdriftreconcilerObservation
-    from server.IaCDriftReconciler_environment import IacdriftreconcilerEnvironment
+    from ..models import IaCDriftReconcilerAction, IaCDriftReconcilerObservation
+    from .IaCDriftReconciler_environment import IaCDriftReconcilerEnvironment
+except ImportError:
+    from models import IaCDriftReconcilerAction, IaCDriftReconcilerObservation  # type: ignore[no-redef]
+    from server.IaCDriftReconciler_environment import IaCDriftReconcilerEnvironment  # type: ignore[no-redef]
 
 
-# Create the app with web interface and README integration
+# ── Create the app via the OpenEnv factory ─────────────────────────────────
 app = create_app(
-    IacdriftreconcilerEnvironment,
-    IacdriftreconcilerAction,
-    IacdriftreconcilerObservation,
+    IaCDriftReconcilerEnvironment,
+    IaCDriftReconcilerAction,
+    IaCDriftReconcilerObservation,
     env_name="IaCDriftReconciler",
-    max_concurrent_envs=1,  # increase this number to allow more concurrent WebSocket sessions
+    # Keep at 1 for submission (2 vCPU constraint).
+    # Raise to e.g. 4 for parallel inference once tested.
+    max_concurrent_envs=1,
 )
 
 
-def main(host: str = "0.0.0.0", port: int = 8000):
+# ── Custom route: GET /tasks ───────────────────────────────────────────────
+@app.get(
+    "/tasks",
+    summary="List available task IDs",
+    response_model=List[str],
+    tags=["tasks"],
+)
+async def list_tasks() -> List[str]:
+    """Return the list of task IDs that can be passed to ``/reset``.
+
+    The environment currently ships three tasks of increasing difficulty:
+    * ``"easy"``   — two independent attribute fixes, no guardrail danger.
+    * ``"medium"`` — guardrail urgency + import-vs-delete decision.
+    * ``"hard"``   — five-resource dependency chain; order enforcement.
     """
-    Entry point for direct execution via uv run or python -m.
+    return ["easy", "medium", "hard"]
 
-    This function enables running the server without Docker:
+
+# ── Entry point for direct execution ──────────────────────────────────────
+def main(host: str = "0.0.0.0", port: int = 8000) -> None:
+    """Start the uvicorn server programmatically.
+
+    Equivalent CLI commands::
+
         uv run --project . server
-        uv run --project . server --port 8001
-        python -m IaCDriftReconciler.server.app
-
-    Args:
-        host: Host address to bind to (default: "0.0.0.0")
-        port: Port number to listen on (default: 8000)
-
-    For production deployments, consider using uvicorn directly with
-    multiple workers:
-        uvicorn IaCDriftReconciler.server.app:app --workers 4
+        uvicorn server.app:app --host 0.0.0.0 --port 8000
     """
     import uvicorn
-
     uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="IaC Drift Reconciler server")
+    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
-    main(port=args.port)
+    main(host=args.host, port=args.port)
