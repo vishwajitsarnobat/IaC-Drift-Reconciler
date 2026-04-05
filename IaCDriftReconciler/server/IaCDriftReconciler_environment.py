@@ -1,14 +1,10 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 """
 Iacdriftreconciler Environment Implementation.
 
 A simple test environment that echoes back messages sent to it.
 Perfect for testing HTTP server infrastructure.
+
+TODO: Define what the environment is doing
 """
 
 from uuid import uuid4
@@ -24,19 +20,7 @@ except ImportError:
 
 class IacdriftreconcilerEnvironment(Environment):
     """
-    A simple echo environment that echoes back messages.
-
     This environment is designed for testing the HTTP server infrastructure.
-    It maintains minimal state and simply echoes back whatever message it receives.
-
-    Example:
-        >>> env = IacdriftreconcilerEnvironment()
-        >>> obs = env.reset()
-        >>> print(obs.echoed_message)  # "Iacdriftreconciler environment ready!"
-        >>>
-        >>> obs = env.step(IacdriftreconcilerAction(message="Hello"))
-        >>> print(obs.echoed_message)  # "Hello"
-        >>> print(obs.message_length)  # 5
     """
 
     # Enable concurrent WebSocket sessions.

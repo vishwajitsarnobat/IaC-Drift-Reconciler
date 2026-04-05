@@ -13,169 +13,271 @@ tags:
 
 # IaC Drift Reconciler Environment
 
-An OpenEnv reinforcement learning environment where an agent learns to reconcile infrastructure drift – transforming a drifted **actual state** into the **desired state** – while strictly respecting **immutable guardrails** (the “Holy Grail”). This is the first open benchmark for safe, sequential infrastructure repair.
+An [OpenEnv](https://github.com/meta-pytorch/openenv)-compatible reinforcement learning environment where an agent learns to reconcile infrastructure drift by transforming a drifted **actual state** into a **desired state**, while strictly respecting a set of **immutable guardrail constraints**. This is the first open benchmark for safe, sequential infrastructure repair.
 
 ## Quick Start
 
-The simplest way to use the environment is through the `IaCDriftReconcilerEnv` class:
+The simplest way to use the IaC Drift Reconciler environment is through the `IaCDriftReconcilerEnv` class:
 
 ```python
-from iac_drift_reconciler import IaCDriftReconcilerAction, IaCDriftReconcilerEnv
-
-# Create environment from Docker image (built locally or pulled)
-env = IaCDriftReconcilerEnv.from_docker_image("iac-drift-reconciler:latest")
-
-# Reset to a specific task (easy / medium / hard)
-result = env.reset(task_id="easy")
-print(f"Initial drift score: {result.observation.drift_score}")
-
-# Take a reconciliation action
-action = IaCDriftReconcilerAction(
-    action_type="update_resource",
-    resource_name="aws_instance.web",
-    attribute="instance_type",
-    new_value="t3.micro"
-)
-result = env.step(action)
-print(f"Reward: {result.reward}, Drift remaining: {result.observation.drift_score}")
-
-# Always clean up
-env.close()
+# <!-- CODE PLACEHOLDER -->
+# Minimal working example demonstrating:
+#   - IaCDriftReconcilerEnv.from_docker_image()
+#   - env.reset(task_id=...)
+#   - env.step(IaCDriftReconcilerAction(...))
+#   - env.close()
+# Source: client.py
+# Status: pending finalization of client API and Docker image name.
 ```
 
-The client handles container startup, WebSocket connection, and automatic cleanup.
+That's it! The `IaCDriftReconcilerEnv.from_docker_image()` method handles:
+- Starting the Docker container
+- Waiting for the server to be ready
+- Connecting to the environment
+- Container cleanup when you call `close()`
 
 ## Building the Docker Image
 
-Before using the environment, build the Docker image:
+Before using the environment, you need to build the Docker image:
 
 ```bash
-# From project root (where server/Dockerfile is located)
-docker build -t iac-drift-reconciler:latest -f server/Dockerfile .
+# <!-- CODE PLACEHOLDER -->
+# docker build command with the correct -f path and image tag.
+# Source: server/Dockerfile
+# Status: pending finalization of Dockerfile.
 ```
 
 ## Deploying to Hugging Face Spaces
 
-Deploy your environment to Hugging Face Spaces using the `openenv push` command:
+You can easily deploy your OpenEnv environment to Hugging Face Spaces using the `openenv push` command:
 
 ```bash
-# From the directory containing openenv.yaml
+# From the environment directory (where openenv.yaml is located)
 openenv push
 
-# Or specify a custom repository
-openenv push --repo-id your-username/iac-drift-reconciler --private
+# Or specify options
+openenv push --namespace my-org --private
 ```
 
-After deployment, your space will be available at:
+The `openenv push` command will:
+1. Validate that the directory is an OpenEnv environment (checks for `openenv.yaml`)
+2. Prepare a custom build for a Hugging Face Docker Space (enables the web interface)
+3. Upload to Hugging Face (prompts for login if not already authenticated)
+
+### Prerequisites
+
+- Authenticate with Hugging Face: the command will prompt for login if not already authenticated.
+- Set the required environment variables in your Space settings:
+
+| Variable | Description |
+|----------|-------------|
+| `API_BASE_URL` | The API endpoint for LLM inference (e.g., `https://api.openai.com/v1`). |
+| `MODEL_NAME` | The model identifier to use (e.g., `gpt-4o`). |
+| `HF_TOKEN` | Your Hugging Face API token. |
+
+### Options
+
+- `--directory`, `-d`: Directory containing the OpenEnv environment (defaults to current directory).
+- `--repo-id`, `-r`: Repository ID in format `username/repo-name` (defaults to `username/env-name` from `openenv.yaml`).
+- `--base-image`, `-b`: Base Docker image to use (overrides the Dockerfile `FROM`).
+- `--private`: Deploy the Space as private (default: public).
+
+### Examples
+
+```bash
+# Push to your personal namespace (defaults to username/env-name from openenv.yaml)
+openenv push
+
+# Push to a specific repository
+openenv push --repo-id my-org/iac-drift-reconciler
+
+# Push with a custom base image
+openenv push --base-image ghcr.io/meta-pytorch/openenv-base:latest
+
+# Push as a private Space
+openenv push --private
+
+# Combine options
+openenv push --repo-id my-org/iac-drift-reconciler --base-image custom-base:latest --private
+```
+
+After deployment, your Space will be available at:
 `https://huggingface.co/spaces/<repo-id>`
 
-The deployed space includes:
-- **Web Interface** at `/web` – Interactive UI to test tasks manually.
-- **API Documentation** at `/docs` – Full OpenAPI/Swagger interface.
-- **Health Check** at `/health` – Container health monitoring.
-- **WebSocket** at `/ws` – Persistent session for low‑latency episodes.
+The deployed Space includes:
+- **Web Interface** at `/web`: interactive UI for exploring and manually testing tasks.
+- **API Documentation** at `/docs`: full OpenAPI / Swagger interface.
+- **Health Check** at `/health`: container health monitoring.
+- **WebSocket** at `/ws`: persistent session endpoint for low-latency episodes.
 
 ## Environment Details
 
-### Action Space (`IaCDriftReconcilerAction`)
+### Action
 
-The agent can choose from the following atomic actions (each is a Pydantic model):
+**`IaCDriftReconcilerAction`**: the atomic operation the agent submits at each step.
 
 | Action Type | Parameters | Description |
 |-------------|------------|-------------|
 | `update_resource` | `resource_name`, `attribute`, `new_value` | Change an attribute of an existing resource (e.g., instance type). |
-| `create_missing_resource` | `resource_type`, `name`, `properties` | Create a resource that exists in desired state but is missing in actual state. |
-| `delete_extra_resource` | `resource_name` | Delete a resource that exists in actual state but is not in desired state. |
-| `attach_volume` | `instance_name`, `volume_name` | Attach a volume to an instance (respects dependency order). |
-| `detach_volume` | `instance_name`, `volume_name` | Detach a volume (if allowed by holy grail rules). |
-| `no_op` | – | Do nothing (useful for testing or when agent is stuck). |
+| `create_missing_resource` | `resource_type`, `name`, `properties` | Create a resource present in the desired state but absent from the actual state. |
+| `delete_extra_resource` | `resource_name` | Delete a resource present in the actual state but absent from the desired state. |
+| `attach_volume` | `instance_name`, `volume_name` | Attach a volume to an instance, respecting dependency order. |
+| `detach_volume` | `instance_name`, `volume_name` | Detach a volume, subject to guardrail constraints. |
+| `no_op` | N/A | Take no action. Useful when the agent requires more context before committing. |
 
-> **Placeholder**: The final action set may be extended. See `models.py` for the exact definitions.
+```python
+# <!-- CODE PLACEHOLDER -->
+# Full IaCDriftReconcilerAction Pydantic model definition.
+# Source: models.py
+# Status: pending finalization of action set.
+```
 
-### Observation Space (`IaCDriftReconcilerObservation`)
+### Observation
 
-Each step returns an observation containing:
+**`IaCDriftReconcilerObservation`**: returned after every `reset()` and `step()` call.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `actual_state` | `dict` | Full JSON representation of the current actual infrastructure. |
-| `desired_state` | `dict` | The target infrastructure (never changes during an episode). |
-| `drift_items` | `list[DriftItem]` | List of detected drifts (resource, attribute, desired value, actual value). |
-| `drift_score` | `float` | Normalized measure of remaining drift (0.0 = fully reconciled). |
-| `holy_grail_rules` | `list[str]` | Human‑readable list of immutable constraints. |
+| `desired_state` | `dict` | The target infrastructure. Does not change during an episode. |
+| `drift_items` | `list[DriftItem]` | Detected drifts, where each entry records the resource, attribute, desired value, and actual value. |
+| `drift_score` | `float` | Normalised measure of remaining drift. `0.0` means fully reconciled. |
+| `holy_grail_rules` | `list[str]` | Human-readable list of immutable constraints in scope for this task. |
 | `step_count` | `int` | Number of steps taken so far in this episode. |
-| `done` | `bool` | True if episode ended (success or violation). |
-| `metadata` | `dict` | Additional info (e.g., last action result). |
+| `done` | `bool` | `True` if the episode has ended by success, violation, or max steps. |
+| `metadata` | `dict` | Additional diagnostic info such as the last action result. |
 
-### Reward Function
+```python
+# <!-- CODE PLACEHOLDER -->
+# Full IaCDriftReconcilerObservation and DriftItem Pydantic model definitions.
+# Source: models.py
+# Status: pending finalization of observation schema.
+```
+
+### Reward
 
 The reward at each step is computed as:
 
 ```
-reward = (old_drift_score - new_drift_score) * α + violation_penalty + success_bonus
+reward = (old_drift_score − new_drift_score) × α  +  violation_penalty  +  success_bonus
 ```
 
-- **Drift reduction**: Positive reward proportional to how much the drift score decreased.
-- **Holy grail violation**: `-1.0` and episode terminates immediately.
-- **Success bonus**: `+1.0` when `drift_score == 0.0` (fully reconciled).
-- **Optional inefficiency penalty**: Small negative reward per step to encourage shorter sequences.
+| Term | Value | Condition |
+|------|-------|-----------|
+| Drift reduction | `(old_drift_score − new_drift_score) × α` | Positive when drift decreases. `α` is a scaling coefficient. |
+| Guardrail violation | `-1.0` | Any action that violates a guardrail constraint; episode terminates immediately. |
+| Success bonus | `+1.0` | Awarded when `drift_score == 0.0` (fully reconciled). |
+| Inefficiency penalty | Small negative per step | Optional; encourages shorter action sequences. |
 
-> **Placeholder**: The exact coefficients and any additional shaping terms will be finalized in `server/ia_cdrift_reconciler_environment.py`.
+```python
+# <!-- CODE PLACEHOLDER -->
+# Full reward computation implementation.
+# Source: server/ia_cdrift_reconciler_environment.py
+# Status: coefficients (α and inefficiency penalty weight) pending finalization.
+```
 
-### Holy Grail Rules (Immutable Guardrails)
+### Guardrail Constraints
 
-These rules are loaded per task and cannot be violated by any action. Example rules:
+Guardrail constraints are loaded per task and represent non-negotiable organisational policy. Any action that violates a constraint immediately terminates the episode with `reward = -1.0`. The full constraint set is provided to the agent in every observation via `holy_grail_rules`.
 
-- `"aws_s3_bucket.data must have block_public_access = true"`
-- `"aws_db_instance.main must have backup_retention_days >= 7"`
-- `"aws_security_group.web_sg must NOT contain a rule with port 22"`
+Example rules:
 
-If an action would break any rule, the environment returns `done=True`, `reward=-1.0`, and the episode ends.
+```
+"aws_s3_bucket.data must have block_public_access = true"
+"aws_db_instance.main must have backup_retention_days >= 7"
+"aws_security_group.web_sg must NOT contain a rule with port 22"
+```
 
-## Tasks and Difficulty Progression
+### Tasks
 
-The environment provides three pre‑defined tasks (easy / medium / hard). Each task includes:
-- A **desired state** (JSON)
-- An **actual state** (JSON, drifted)
-- A set of **holy grail rules**
+The environment ships with three pre-defined tasks of increasing difficulty. Each task specifies a desired state, a drifted actual state, and a set of guardrail constraints.
 
 | Task | Description | Key Challenge |
-|------|-------------|----------------|
-| **Easy** | Two resources have wrong instance sizes. | Simple attribute updates, no dependencies. |
-| **Medium** | An extra security group rule was added manually (shadow resource). | Agent must delete the extra rule, not just update. |
-| **Hard** | Cascading drift: missing a volume makes the instance size drift unresolvable until the volume is created and attached. | Agent must discover dependency and re‑plan mid‑episode. |
+|------|-------------|---------------|
+| **Easy** | Two resources have the wrong instance sizes. | Simple attribute updates with no resource dependencies. |
+| **Medium** | A security group rule was added manually outside Terraform (shadow resource). | Agent must decide whether to delete or import the unmanaged rule; the incorrect choice violates a guardrail constraint. |
+| **Hard** | Cascading drift: a missing EBS volume makes the instance-type drift unresolvable until the volume is created and attached first. | Agent must discover the dependency, sequence fixes correctly, and re-plan mid-episode. |
 
-> **Placeholder**: Exact JSON definitions for each task will be placed in `tasks/` directory.
+```jsonc
+// <!-- CODE PLACEHOLDER -->
+// Task JSON definitions for easy, medium, and hard scenarios.
+// Source: tasks/task_easy.json, tasks/task_medium.json, tasks/task_hard.json
+// Status: pending finalization of resource schemas.
+```
 
-## Real‑World Use Cases (Why This Matters)
+## Advanced Usage
 
-A trained agent can be deployed to:
+### Connecting to an Existing Server
 
-1. **Compliance enforcement** – Automatically fix drift while never violating security or audit rules (e.g., keep S3 buckets private).
-2. **Safe database migrations** – Sequence upgrades (create replica → test → promote → delete old) without downtime.
-3. **Cascading fix after emergency patching** – Recognise that a manually added firewall rule is legitimate and propose adding it to the desired state instead of deleting it.
-4. **Cost‑aware reconciliation** – Choose cheaper sequences (spot instances, off‑peak changes) when multiple options exist.
+If you already have an IaC Drift Reconciler environment server running, you can connect directly:
 
-## Novelty
+```python
+# <!-- CODE PLACEHOLDER -->
+# Example showing IaCDriftReconcilerEnv(base_url="...") direct connection.
+# Note: env.close() will NOT stop the server when connecting this way.
+# Source: client.py
+# Status: pending finalization of client API.
+```
 
-This environment is the first open‑source RL benchmark for infrastructure drift reconciliation with **immutable guardrails**. Unlike static policy engines or linear remediation scripts, an RL agent must learn to:
+### Using the Context Manager
 
-- **Sequence actions** safely (e.g., create before delete).
-- **Discover hidden dependencies** (cascading drift).
-- **Generalise** to unseen drift patterns.
-- **Trade off** cost, speed, and safety.
+The client supports context manager usage for automatic connection management:
+
+```python
+# <!-- CODE PLACEHOLDER -->
+# Example showing `with IaCDriftReconcilerEnv(...) as env:` pattern.
+# Demonstrate reset() + multiple step() calls inside the context.
+# Source: client.py
+# Status: pending finalization of client API.
+```
+
+The client uses WebSocket connections for:
+- **Lower latency**: no HTTP connection overhead per request.
+- **Persistent session**: the server maintains your environment state across steps.
+- **Efficient for episodes**: better performance for many sequential steps.
+
+### Concurrent WebSocket Sessions
+
+The server supports multiple concurrent WebSocket connections. To enable this, modify `server/app.py` to use factory mode:
+
+```python
+# In server/app.py, use factory mode for concurrent sessions
+app = create_app(
+    IaCDriftReconcilerEnvironment,  # Pass class, not instance
+    IaCDriftReconcilerAction,
+    IaCDriftReconcilerObservation,
+    max_concurrent_envs=4,          # Allow 4 concurrent sessions
+)
+```
+
+Then multiple clients can connect simultaneously:
+
+```python
+# <!-- CODE PLACEHOLDER -->
+# Concurrent episode example using ThreadPoolExecutor.
+# Source: client.py
+# Status: pending finalization of client API.
+```
 
 ## Development & Testing
 
-### Run Core Environment Logic (without HTTP server)
+### Direct Environment Testing
+
+Test the environment logic directly without starting the HTTP server:
 
 ```bash
-python server/ia_cdrift_reconciler_environment.py
+python3 server/ia_cdrift_reconciler_environment.py
 ```
 
-This runs a quick test of reset/step/reward logic.
+This verifies that:
+- Environment resets correctly for all three tasks.
+- `step()` executes actions and updates the actual state properly.
+- Guardrail violation detection terminates episodes correctly.
+- Drift score and reward are calculated correctly at each step.
 
-### Run the FastAPI Server Locally
+### Running Locally
+
+Run the server locally for development:
 
 ```bash
 uvicorn server.app:app --reload
@@ -183,34 +285,40 @@ uvicorn server.app:app --reload
 
 Then connect using the client with `base_url="http://localhost:8000"`.
 
-## Project Structure (Placeholder)
+### Running the Baseline Inference Script
+
+```bash
+# Set required environment variables, then:
+python inference.py
+```
+
+```
+# <!-- CODE PLACEHOLDER -->
+# Baseline scores produced by inference.py against all three tasks.
+# Format: task_id | model | score | steps_taken
+# Status: pending completion of inference.py and HF Space deployment.
+```
+
+## Project Structure
 
 ```
 iac-drift-reconciler/
-├── .dockerignore
-├── README.md                 # This file
-├── openenv.yaml              # OpenEnv manifest
-├── pyproject.toml            # Dependencies (pydantic, fastapi, etc.)
-├── models.py                 # Action, Observation, DriftItem models
-├── client.py                 # IaCDriftReconcilerEnv client
-├── tasks/                    # [TODO] JSON files for easy/medium/hard tasks
-├── server/
-│   ├── __init__.py
-│   ├── ia_cdrift_reconciler_environment.py   # Core environment class
-│   ├── app.py                                # FastAPI + WebSocket endpoints
-│   └── Dockerfile
-└── tests/                    # [TODO] Unit tests for graders and state transitions
+├── .dockerignore                               # Docker build exclusions
+├── __init__.py                                 # Module exports
+├── README.md                                   # This file
+├── openenv.yaml                                # OpenEnv manifest
+├── pyproject.toml                              # Project metadata and dependencies
+├── uv.lock                                     # Locked dependencies (generated)
+├── inference.py                                # Baseline inference script (OpenAI client)
+├── client.py                                   # IaCDriftReconcilerEnv client
+├── models.py                                   # Action, Observation, DriftItem models
+├── tasks/
+│   ├── task_easy.json                          # Desired + actual state + guardrail constraints
+│   ├── task_medium.json
+│   └── task_hard.json
+└── server/
+    ├── __init__.py                             # Server module exports
+    ├── ia_cdrift_reconciler_environment.py     # Core environment: step / reset / state / reward
+    ├── app.py                                  # FastAPI + WebSocket endpoints
+    └── Dockerfile                              # Container image definition
 ```
-
-## Next Steps (To Be Completed)
-
-- [ ] Finalize action space and reward coefficients.
-- [ ] Implement the three task JSONs with realistic resource schemas.
-- [ ] Write the `openenv.yaml` metadata file.
-- [ ] Add baseline inference script (`inference.py`) using OpenAI client.
-- [ ] Run `openenv validate` and fix any spec violations.
-- [ ] Deploy to Hugging Face Spaces and test with the validation script.
-
----
-
-For questions or contributions, please refer to the [OpenEnv documentation](https://github.com/meta-pytorch/openenv).
