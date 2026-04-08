@@ -19,6 +19,7 @@ All debug output goes to stderr.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import textwrap
@@ -29,10 +30,13 @@ from openai import OpenAI
 # ── env client & models ────────────────────────────────────────────────────
 try:
     from IaCDriftReconciler.client import IaCDriftReconcilerEnv
-    from IaCDriftReconciler.models import IaCDriftReconcilerAction, IaCDriftReconcilerObservation
+    from IaCDriftReconciler.models import (
+        IaCDriftReconcilerAction,
+        IaCDriftReconcilerObservation,
+    )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from client import IaCDriftReconcilerEnv          # type: ignore[no-redef]
+    from client import IaCDriftReconcilerEnv  # type: ignore[no-redef]
     from models import IaCDriftReconcilerAction, IaCDriftReconcilerObservation  # type: ignore[no-redef]
 
 # ---------------------------------------------------------------------------
@@ -40,15 +44,18 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
-MODEL_NAME   = os.getenv("MODEL_NAME")   or "Qwen/Qwen2.5-72B-Instruct"
-HF_TOKEN     = os.getenv("HF_TOKEN")     or os.getenv("API_KEY") or ""
+MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
+HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or ""
 ENV_BASE_URL = os.getenv("ENV_BASE_URL") or "http://localhost:8000"
-MAX_STEPS    = int(os.getenv("MAX_STEPS", "30"))
+MAX_STEPS = int(os.getenv("MAX_STEPS", "30"))
 
 BENCHMARK = "IaCDriftReconciler"
-TASK_IDS  = ["easy", "medium", "hard"]
+TASK_IDS = ["easy", "medium", "hard"]
 
-SUCCESS_SCORE_THRESHOLD = 0.99   # drift_score == 0.0 ↔ score == 1.0
+SCORE_DECIMALS = 3
+MIN_TASK_SCORE = 10 ** (-SCORE_DECIMALS)  # 0.001
+MAX_TASK_SCORE = 1.0 - MIN_TASK_SCORE  # 0.999
+SUCCESS_SCORE_THRESHOLD = 0.99
 
 # ---------------------------------------------------------------------------
 # OpenAI-compatible client (HF Router uses the same API surface)
@@ -60,13 +67,16 @@ llm = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN or "placeholder")
 # Stdout log helpers  (exact format the evaluator parses)
 # ---------------------------------------------------------------------------
 
+
 def log_start(task: str, model: str) -> None:
     print(f"[START] task={task} env={BENCHMARK} model={model}", flush=True)
 
 
-def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+def log_step(
+    step: int, action: str, reward: float, done: bool, error: Optional[str]
+) -> None:
     error_val = error if error else "null"
-    done_val  = str(done).lower()
+    done_val = str(done).lower()
     print(
         f"[STEP] step={step} action={action} reward={reward:.2f} "
         f"done={done_val} error={error_val}",
@@ -87,9 +97,18 @@ def _debug(msg: str) -> None:
     print(f"[debug] {msg}", file=sys.stderr, flush=True)
 
 
+def _normalise_task_score(raw_score: float) -> float:
+    """Return a finite score strictly inside (0, 1), rounded for log output."""
+    if not math.isfinite(raw_score):
+        return MIN_TASK_SCORE
+    clamped = max(MIN_TASK_SCORE, min(raw_score, MAX_TASK_SCORE))
+    return round(clamped, SCORE_DECIMALS)
+
+
 # ---------------------------------------------------------------------------
 # Compact action string for [STEP] log
 # ---------------------------------------------------------------------------
+
 
 def _action_str(action: IaCDriftReconcilerAction) -> str:
     """Return a short, evaluator-safe single-line representation of the action."""
@@ -139,15 +158,16 @@ SYSTEM_PROMPT = textwrap.dedent(f"""\
 
 
 def _build_user_prompt(obs: IaCDriftReconcilerObservation, step: int) -> str:
-    drift_lines = "\n".join(
-        f"  {i+1}. {d.resource_id}.{d.field}: "
-        f"actual={d.actual_value!r} → desired={d.desired_value!r} [{d.severity}]"
-        for i, d in enumerate(obs.drift_items)
-    ) or "  (none — fully reconciled)"
+    drift_lines = (
+        "\n".join(
+            f"  {i + 1}. {d.resource_id}.{d.field}: "
+            f"actual={d.actual_value!r} → desired={d.desired_value!r} [{d.severity}]"
+            for i, d in enumerate(obs.drift_items)
+        )
+        or "  (none — fully reconciled)"
+    )
 
-    guardrail_lines = "\n".join(
-        f"  - {r}" for r in obs.holy_grail_rules
-    ) or "  (none)"
+    guardrail_lines = "\n".join(f"  - {r}" for r in obs.holy_grail_rules) or "  (none)"
 
     return textwrap.dedent(f"""\
         STEP {step} | drift_score={obs.drift_score:.4f} | remaining_drifts={len(obs.drift_items)}
@@ -164,6 +184,7 @@ def _build_user_prompt(obs: IaCDriftReconcilerObservation, step: int) -> str:
 # ---------------------------------------------------------------------------
 # LLM call
 # ---------------------------------------------------------------------------
+
 
 def _call_llm(user_prompt: str, conversation_history: list) -> str:
     messages = [
@@ -186,7 +207,9 @@ def _parse_action(raw: str) -> IaCDriftReconcilerAction:
     # Strip markdown fences if model wraps in ```json ... ```
     if text.startswith("```"):
         lines = text.splitlines()
-        text = "\n".join(l for l in lines[1:] if not l.strip().startswith("```")).strip()
+        text = "\n".join(
+            l for l in lines[1:] if not l.strip().startswith("```")
+        ).strip()
     data = json.loads(text)
     return IaCDriftReconcilerAction(**data)
 
@@ -195,6 +218,7 @@ def _parse_action(raw: str) -> IaCDriftReconcilerAction:
 # Episode runner
 # ---------------------------------------------------------------------------
 
+
 def run_episode(env, task_id: str) -> dict:
     """Run one full episode; returns summary dict."""
     result = env.reset(task_id=task_id)
@@ -202,11 +226,11 @@ def run_episode(env, task_id: str) -> dict:
 
     log_start(task=task_id, model=MODEL_NAME)
 
-    rewards:  List[float] = []
+    rewards: List[float] = []
     conversation_history: list = []
     steps_taken = 0
-    success     = False
-    score       = 0.0
+    success = False
+    score = MIN_TASK_SCORE
 
     try:
         for step in range(1, MAX_STEPS + 1):
@@ -214,27 +238,27 @@ def run_episode(env, task_id: str) -> dict:
                 break
 
             user_prompt = _build_user_prompt(obs, step)
-            raw_text    = ""
+            raw_text = ""
             action: IaCDriftReconcilerAction
             error_msg: Optional[str] = None
 
             try:
                 raw_text = _call_llm(user_prompt, conversation_history)
-                action   = _parse_action(raw_text)
+                action = _parse_action(raw_text)
                 _debug(f"  step {step}: {_action_str(action)}")
             except Exception as exc:
                 _debug(f"  step {step}: parse/call error ({exc!r}) → no_op fallback")
-                action    = IaCDriftReconcilerAction(action_type="no_op")
+                action = IaCDriftReconcilerAction(action_type="no_op")
                 error_msg = str(exc)[:120]
-                raw_text  = raw_text or "<error>"
+                raw_text = raw_text or "<error>"
 
             # Append to history so the model has sequential context
-            conversation_history.append({"role": "user",      "content": user_prompt})
+            conversation_history.append({"role": "user", "content": user_prompt})
             conversation_history.append({"role": "assistant", "content": raw_text})
 
             # Step the environment
             result = env.step(action)
-            obs    = result.observation
+            obs = result.observation
             reward = float(
                 result.reward
                 if result.reward is not None
@@ -245,7 +269,9 @@ def run_episode(env, task_id: str) -> dict:
             if not obs.metadata.get("last_action_valid", True):
                 error_msg = obs.metadata.get("error", error_msg)
             if obs.metadata.get("guardrail_violated"):
-                error_msg = f"guardrail_violated: {obs.metadata.get('violated_rule', '')}"
+                error_msg = (
+                    f"guardrail_violated: {obs.metadata.get('violated_rule', '')}"
+                )
 
             rewards.append(reward)
             steps_taken = step
@@ -261,20 +287,25 @@ def run_episode(env, task_id: str) -> dict:
             if done:
                 break
 
-        # Score = 1 - remaining drift (1.0 = fully reconciled)
-        score   = round(1.0 - float(obs.drift_score), 3)
+        # Score = 1 - remaining drift, then normalised to strict (0, 1)
+        score = _normalise_task_score(1.0 - float(obs.drift_score))
         success = score >= SUCCESS_SCORE_THRESHOLD
 
     finally:
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
-    return {"task_id": task_id, "score": score, "steps_taken": steps_taken,
-            "success": success}
+    return {
+        "task_id": task_id,
+        "score": score,
+        "steps_taken": steps_taken,
+        "success": success,
+    }
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     _debug(f"API_BASE_URL = {API_BASE_URL}")
@@ -293,14 +324,20 @@ def main() -> None:
                 results.append(summary)
             except Exception as exc:
                 _debug(f"Episode crashed for task_id={task_id!r}: {exc!r}")
-                log_end(success=False, steps=0, score=0.0, rewards=[])
-                results.append({"task_id": task_id, "score": 0.0,
-                                 "steps_taken": 0, "success": False})
+                fallback_score = _normalise_task_score(0.0)
+                log_end(success=False, steps=0, score=fallback_score, rewards=[])
+                results.append(
+                    {
+                        "task_id": task_id,
+                        "score": fallback_score,
+                        "steps_taken": 0,
+                        "success": False,
+                    }
+                )
 
     # Human-readable summary to stderr only
     print("\n" + "=" * 60, file=sys.stderr)
-    print(f"  {'task':<10} {'model':<30} {'score':>6} {'steps':>6}",
-          file=sys.stderr)
+    print(f"  {'task':<10} {'model':<30} {'score':>6} {'steps':>6}", file=sys.stderr)
     print("=" * 60, file=sys.stderr)
     for r in results:
         print(
