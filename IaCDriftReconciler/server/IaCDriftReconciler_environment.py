@@ -240,6 +240,7 @@ class IaCDriftReconcilerEnvironment(Environment):
         self._task_id: Optional[str] = None
         self._current_drift_items: List[DriftItem] = []
         self._current_drift_score: float = 1.0
+        self._done: bool = False
 
     # ── Public API ─────────────────────────────────────────────────────
 
@@ -257,6 +258,7 @@ class IaCDriftReconcilerEnvironment(Environment):
         self._episode_id   = str(uuid4())
         self._task_id      = task_id
         self.step_count    = 0
+        self._done         = False
 
         # Deep-copy so mutations never corrupt the on-disk data
         self.desired_state         = copy.deepcopy(task_data["desired_state"])
@@ -288,6 +290,20 @@ class IaCDriftReconcilerEnvironment(Environment):
         """
         old_score = self._current_drift_score
 
+        # ── 0. Episode already over ────────────────────────────────────
+        # Without this guard an agent could keep stepping after success and
+        # collect the +1.0 success bonus again on every no_op.
+        if self._done:
+            return self._make_obs(
+                done=True,
+                metadata={
+                    "last_action_valid": False,
+                    "error": "Episode is over; call reset() to start a new one.",
+                    "reward": 0.0,
+                    "step": self.step_count,
+                },
+            )
+
         # ── 1. Field validation ────────────────────────────────────────
         valid, field_err = self._validate_action_fields(action)
         if not valid:
@@ -305,8 +321,9 @@ class IaCDriftReconcilerEnvironment(Environment):
         dep_ok, dep_err = self._check_dependency_order(action)
         if not dep_ok:
             self.step_count += 1
+            self._done = self.step_count >= MAX_STEPS
             return self._make_obs(
-                done=self.step_count >= MAX_STEPS,
+                done=self._done,
                 metadata={
                     "last_action_valid": False,
                     "error": dep_err,
@@ -319,6 +336,7 @@ class IaCDriftReconcilerEnvironment(Environment):
         violated, violated_rule = self._check_guardrail_violation(action)
         if violated:
             self.step_count += 1
+            self._done = True
             return self._make_obs(
                 done=True,
                 metadata={
@@ -348,6 +366,7 @@ class IaCDriftReconcilerEnvironment(Environment):
         # ── 7. Step count / done ───────────────────────────────────────
         self.step_count += 1
         done = success or (self.step_count >= MAX_STEPS)
+        self._done = done
 
         # ── 8. Return ──────────────────────────────────────────────────
         meta: Dict[str, Any] = {
