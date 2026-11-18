@@ -13,7 +13,9 @@ STDOUT FORMAT  (evaluator parses these — do not change):
   [STEP]  step=<n> action=<str> reward=<0.00> done=<true|false> error=<msg|null>
   [END]   success=<true|false> steps=<n> score=<0.000> rewards=<r1,r2,...>
 
-All debug output goes to stderr.
+All debug output goes to stderr, including a per-episode [SUMMARY] line:
+  [SUMMARY] task=<id> success=<bool> steps=<n> final_drift=<0.000> violations=<n>
+            rejected_actions=<n> parse_errors=<n> llm_errors=<n>
 """
 
 from __future__ import annotations
@@ -55,7 +57,17 @@ TASK_IDS = ["easy", "medium", "hard"]
 SCORE_DECIMALS = 3
 MIN_TASK_SCORE = 10 ** (-SCORE_DECIMALS)  # 0.001
 MAX_TASK_SCORE = 1.0 - MIN_TASK_SCORE  # 0.999
-SUCCESS_SCORE_THRESHOLD = 0.99
+
+# Only the last few turns are sent back to the model.  Every user prompt
+# already contains the full current drift list, so older turns add cost
+# without adding information.
+HISTORY_TURNS = int(os.getenv("HISTORY_TURNS", "4"))
+
+# Rewards with a fixed meaning in the environment.  The OpenEnv server strips
+# observation.metadata before sending it, so over HTTP/WebSocket the reward
+# is the only signal of *why* a step went wrong.
+GUARDRAIL_REWARD = -1.0
+REJECTED_ACTION_REWARD = -0.05
 
 # ---------------------------------------------------------------------------
 # OpenAI-compatible client (HF Router uses the same API surface)
@@ -157,7 +169,9 @@ SYSTEM_PROMPT = textwrap.dedent(f"""\
     {{"action_type": "no_op"}}""")
 
 
-def _build_user_prompt(obs: IaCDriftReconcilerObservation, step: int) -> str:
+def _build_user_prompt(
+    obs: IaCDriftReconcilerObservation, step: int, last_error: Optional[str] = None
+) -> str:
     drift_lines = (
         "\n".join(
             f"  {i + 1}. {d.resource_id}.{d.field}: "
@@ -168,8 +182,9 @@ def _build_user_prompt(obs: IaCDriftReconcilerObservation, step: int) -> str:
     )
 
     guardrail_lines = "\n".join(f"  - {r}" for r in obs.holy_grail_rules) or "  (none)"
+    feedback = f"LAST ACTION FAILED: {last_error}\n" if last_error else ""
 
-    return textwrap.dedent(f"""\
+    return feedback + textwrap.dedent(f"""\
         STEP {step} | drift_score={obs.drift_score:.4f} | remaining_drifts={len(obs.drift_items)}
 
         DRIFT ITEMS TO FIX:
@@ -202,21 +217,46 @@ def _call_llm(user_prompt: str, conversation_history: list) -> str:
     return (response.choices[0].message.content or "").strip()
 
 
+class ParseError(ValueError):
+    """The model's reply could not be turned into a valid action."""
+
+
 def _parse_action(raw: str) -> IaCDriftReconcilerAction:
+    """Parse the model's reply into an action.
+
+    Accepts bare JSON, JSON inside ``` fences, or JSON surrounded by prose
+    (we take the outermost {...}).  Raises ParseError otherwise.
+    """
     text = raw.strip()
-    # Strip markdown fences if model wraps in ```json ... ```
-    if text.startswith("```"):
-        lines = text.splitlines()
-        text = "\n".join(
-            l for l in lines[1:] if not l.strip().startswith("```")
-        ).strip()
-    data = json.loads(text)
-    return IaCDriftReconcilerAction(**data)
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end < start:
+        raise ParseError(f"no JSON object in reply: {text[:60]!r}")
+    try:
+        data = json.loads(text[start : end + 1])
+        return IaCDriftReconcilerAction(**data)
+    except Exception as exc:  # JSONDecodeError, pydantic ValidationError, ...
+        raise ParseError(str(exc).splitlines()[0]) from exc
 
 
 # ---------------------------------------------------------------------------
 # Episode runner
 # ---------------------------------------------------------------------------
+
+
+def _step_error(obs: IaCDriftReconcilerObservation, reward: float, done: bool) -> Optional[str]:
+    """Classify what went wrong in a step, if anything.
+
+    Uses observation.metadata when it is available (in-process env) and falls
+    back to the reward, because the OpenEnv server drops metadata on the wire.
+    """
+    meta = obs.metadata or {}
+    if meta.get("guardrail_violated") or (done and reward <= GUARDRAIL_REWARD):
+        rule = meta.get("violated_rule")
+        return f"guardrail_violated: {rule}" if rule else "guardrail_violated"
+    if meta.get("last_action_valid") is False or math.isclose(reward, REJECTED_ACTION_REWARD):
+        detail = meta.get("error")
+        return f"action_rejected: {detail}" if detail else "action_rejected"
+    return None
 
 
 def run_episode(env, task_id: str) -> dict:
@@ -231,30 +271,41 @@ def run_episode(env, task_id: str) -> dict:
     steps_taken = 0
     success = False
     score = MIN_TASK_SCORE
+    counts = {"violations": 0, "rejected_actions": 0, "parse_errors": 0, "llm_errors": 0}
+    last_error: Optional[str] = None
 
     try:
         for step in range(1, MAX_STEPS + 1):
             if obs.done:
                 break
 
-            user_prompt = _build_user_prompt(obs, step)
+            user_prompt = _build_user_prompt(obs, step, last_error)
             raw_text = ""
             action: IaCDriftReconcilerAction
             error_msg: Optional[str] = None
 
             try:
                 raw_text = _call_llm(user_prompt, conversation_history)
-                action = _parse_action(raw_text)
-                _debug(f"  step {step}: {_action_str(action)}")
             except Exception as exc:
-                _debug(f"  step {step}: parse/call error ({exc!r}) → no_op fallback")
+                counts["llm_errors"] += 1
+                error_msg = f"llm_error: {exc}"
+                raw_text = "<llm error>"
+            if error_msg is None:
+                try:
+                    action = _parse_action(raw_text)
+                except ParseError as exc:
+                    counts["parse_errors"] += 1
+                    error_msg = f"parse_error: {exc}"
+            if error_msg is not None:
+                _debug(f"  step {step}: {error_msg} -> no_op fallback")
                 action = IaCDriftReconcilerAction(action_type="no_op")
-                error_msg = str(exc)[:120]
-                raw_text = raw_text or "<error>"
+            else:
+                _debug(f"  step {step}: {_action_str(action)}")
 
-            # Append to history so the model has sequential context
+            # Keep only the last HISTORY_TURNS turns (bounded prompt size).
             conversation_history.append({"role": "user", "content": user_prompt})
             conversation_history.append({"role": "assistant", "content": raw_text})
+            del conversation_history[: -2 * HISTORY_TURNS]
 
             # Step the environment
             result = env.step(action)
@@ -264,14 +315,16 @@ def run_episode(env, task_id: str) -> dict:
                 if result.reward is not None
                 else obs.metadata.get("reward", 0.0)
             )
+            done = bool(result.done or obs.done)
 
-            done = obs.done
-            if not obs.metadata.get("last_action_valid", True):
-                error_msg = obs.metadata.get("error", error_msg)
-            if obs.metadata.get("guardrail_violated"):
-                error_msg = (
-                    f"guardrail_violated: {obs.metadata.get('violated_rule', '')}"
-                )
+            env_error = _step_error(obs, reward, done)
+            if env_error:
+                if env_error.startswith("guardrail_violated"):
+                    counts["violations"] += 1
+                else:
+                    counts["rejected_actions"] += 1
+                error_msg = env_error
+            last_error = error_msg
 
             rewards.append(reward)
             steps_taken = step
@@ -281,25 +334,44 @@ def run_episode(env, task_id: str) -> dict:
                 action=_action_str(action),
                 reward=reward,
                 done=done,
-                error=error_msg,
+                error=_one_line(error_msg),
             )
 
             if done:
                 break
 
-        # Score = 1 - remaining drift, then normalised to strict (0, 1)
-        score = _normalise_task_score(1.0 - float(obs.drift_score))
-        success = score >= SUCCESS_SCORE_THRESHOLD
+        # Success means fully reconciled without breaking a guardrail.
+        # Score = 1 - remaining drift, normalised to strict (0, 1); an episode
+        # that ended on a guardrail violation gets the minimum score.
+        success = obs.drift_score == 0.0 and counts["violations"] == 0
+        if counts["violations"]:
+            score = MIN_TASK_SCORE
+        else:
+            score = _normalise_task_score(1.0 - float(obs.drift_score))
 
     finally:
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+        _debug(
+            f"[SUMMARY] task={task_id} success={str(success).lower()} "
+            f"steps={steps_taken} final_drift={float(obs.drift_score):.3f} "
+            + " ".join(f"{k}={v}" for k, v in counts.items())
+        )
 
     return {
         "task_id": task_id,
         "score": score,
         "steps_taken": steps_taken,
         "success": success,
+        "final_drift": float(obs.drift_score),
+        **counts,
     }
+
+
+def _one_line(msg: Optional[str]) -> Optional[str]:
+    """Keep [STEP] lines single-line and short for the evaluator."""
+    if not msg:
+        return None
+    return " ".join(msg.split())[:160]
 
 
 # ---------------------------------------------------------------------------
@@ -332,17 +404,23 @@ def main() -> None:
                         "score": fallback_score,
                         "steps_taken": 0,
                         "success": False,
+                        "violations": 0,
+                        "parse_errors": 0,
                     }
                 )
 
     # Human-readable summary to stderr only
     print("\n" + "=" * 60, file=sys.stderr)
-    print(f"  {'task':<10} {'model':<30} {'score':>6} {'steps':>6}", file=sys.stderr)
+    print(
+        f"  {'task':<10} {'model':<30} {'score':>6} {'steps':>6} {'viol':>5} {'parse':>5}",
+        file=sys.stderr,
+    )
     print("=" * 60, file=sys.stderr)
     for r in results:
         print(
             f"  {r['task_id']:<10} {MODEL_NAME:<30} "
-            f"{r['score']:>6.3f} {r['steps_taken']:>6}",
+            f"{r['score']:>6.3f} {r['steps_taken']:>6} "
+            f"{r['violations']:>5} {r['parse_errors']:>5}",
             file=sys.stderr,
         )
     print("=" * 60, file=sys.stderr)
