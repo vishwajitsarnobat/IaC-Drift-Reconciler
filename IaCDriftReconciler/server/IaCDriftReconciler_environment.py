@@ -132,8 +132,10 @@ def _coerce_to_target(raw: str, target: Any) -> Any:
     if target is None:
         return _coerce(raw)
     if isinstance(target, bool):
-        c = _coerce(raw)
-        return c if isinstance(c, bool) else bool(raw)
+        # Only "true"/"false" become booleans.  Anything else stays a string
+        # (and so stays drifted) — bool("no") would be True in Python.
+        c = _coerce(raw.strip()) if isinstance(raw, str) else raw
+        return c if isinstance(c, bool) else raw
     if isinstance(target, int):
         try:
             return int(raw)

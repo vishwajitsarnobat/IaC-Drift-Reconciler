@@ -121,3 +121,24 @@ def test_create_missing_resource_happy_path(env):
                            '{"versioning_enabled": true, "region": "us-east-1"}'))
     assert obs.metadata["last_action_valid"] is True
     assert obs.actual_state["aws_s3_bucket.logs"]["fields"]["versioning_enabled"] is True
+
+
+# ── Bug E: string -> bool coercion ──────────────────────────────────────────
+
+@pytest.mark.parametrize("value", ["no", "0", "disabled"])
+def test_non_boolean_string_does_not_become_true(env, value):
+    """bool('no') is True in Python, so 'no' used to *enable* versioning and
+    earn reward for fixing the drift."""
+    env.reset(task_id="easy")
+    obs = env.step(update("aws_s3_bucket.logs", "versioning_enabled", value))
+    assert obs.actual_state["aws_s3_bucket.logs"]["fields"]["versioning_enabled"] is not True
+    assert obs.reward <= 0.0
+    assert obs.drift_score == 1.0
+
+
+@pytest.mark.parametrize("value", ["true", "True", "TRUE", " true "])
+def test_boolean_strings_are_accepted(env, value):
+    env.reset(task_id="easy")
+    obs = env.step(update("aws_s3_bucket.logs", "versioning_enabled", value))
+    assert obs.actual_state["aws_s3_bucket.logs"]["fields"]["versioning_enabled"] is True
+    assert obs.drift_score == pytest.approx(0.5)
