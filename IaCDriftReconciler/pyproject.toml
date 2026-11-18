@@ -39,3 +39,5 @@ package-dir = { "IaCDriftReconciler" = ".", "IaCDriftReconciler.server" = "serve
 [tool.setuptools.package-data]
 # Include task JSON files so they are accessible at runtime inside the container
 "IaCDriftReconciler" = ["tasks/*.json"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
