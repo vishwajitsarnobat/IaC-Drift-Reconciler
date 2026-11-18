@@ -142,3 +142,28 @@ def test_boolean_strings_are_accepted(env, value):
     obs = env.step(update("aws_s3_bucket.logs", "versioning_enabled", value))
     assert obs.actual_state["aws_s3_bucket.logs"]["fields"]["versioning_enabled"] is True
     assert obs.drift_score == pytest.approx(0.5)
+
+
+# ── Bug F: pre-existing violation blamed on an unrelated attribute ──────────
+
+def test_unrelated_attribute_on_resource_with_preexisting_violation(env):
+    """web_sg starts with ingress_port_22=true, which already breaks its rule.
+    Touching a *different* attribute of web_sg used to end the episode at -1."""
+    env.reset(task_id="medium")
+    obs = env.step(update("aws_security_group.web_sg", "ingress_port_443", "true"))
+    assert not obs.done
+    assert obs.metadata["guardrail_violated"] is False
+    # The real fix is still available afterwards.
+    obs = env.step(OPTIMAL["medium"][0])
+    assert obs.drift_score == pytest.approx(0.5)
+
+
+def test_setting_guarded_field_to_bad_value_still_violates(env):
+    """The fix must not weaken the guardrail on the guarded field itself."""
+    env.reset(task_id="hard")
+    obs = env.step(update("aws_subnet.main", "cidr_block", "10.0.1.0/24"))
+    obs = env.step(update("aws_eip.nat", "domain", "vpc"))
+    obs = env.step(update("aws_nat_gateway.main", "connectivity_type", "private-ish"))
+    assert obs.done
+    assert obs.reward == -1.0
+    assert obs.metadata["violated_rule"] == "aws_nat_gateway.main.fields.connectivity_type == public"

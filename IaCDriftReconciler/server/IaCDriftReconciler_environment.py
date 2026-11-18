@@ -28,7 +28,8 @@ Guardrail semantics
 Guardrails are in the format "<resource_type>.<name>.<field_path> <op> <value>".
 A constraint terminates the episode (reward=-1) only when:
   * The projected post-action state violates it, AND
-  * The action targeted the same resource the constraint references.
+  * The action targeted the same resource the constraint references, AND
+  * The action changed the guarded value (or removed the resource).
 This prevents a pre-existing violation (already-drifted field) from blocking every
 unrelated action while still catching the agent choosing a destructive path.
 """
@@ -201,6 +202,16 @@ def _parse_constraint(c: str) -> Optional[Tuple[str, str, str, str]]:
     resource_id = ".".join(dot_parts[:2])
     field_path  = ".".join(dot_parts[2:])
     return resource_id, field_path, op, rhs
+
+
+def _guarded_value(
+    state: Dict[str, Any], resource_id: str, field_path: str
+) -> Tuple[bool, Any]:
+    """(found, value) of a guarded field; found=False if the resource is gone."""
+    resource = state.get(resource_id)
+    if resource is None:
+        return False, None
+    return _get_field(resource, field_path)
 
 
 def _constraint_satisfied(
@@ -553,7 +564,8 @@ class IaCDriftReconcilerEnvironment(Environment):
 
         A constraint causes episode termination only when:
           1. It is violated in the projected state, AND
-          2. The constrained resource is the same resource the action targets.
+          2. The constrained resource is the same resource the action targets, AND
+          3. The action changes the guarded value (or deletes the resource).
 
         Rationale: a pre-existing violation in a *different* resource should not
         block the agent from taking any action on a different resource.  The agent
@@ -571,6 +583,13 @@ class IaCDriftReconcilerEnvironment(Environment):
 
             # Only enforce this constraint when the action targets the same resource
             if res_id != action_res_id:
+                continue
+
+            # ...and only when the action actually changes the guarded value
+            # (including deleting the resource).  A violation that already
+            # existed before this action is drift, not the agent's fault.
+            if _guarded_value(self.actual_state, res_id, field_path) == \
+                    _guarded_value(projected, res_id, field_path):
                 continue
 
             if not _constraint_satisfied(projected, res_id, field_path, op, rhs):
