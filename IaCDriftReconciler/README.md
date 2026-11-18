@@ -154,15 +154,18 @@ The deployed Space includes:
 The reward at each step is computed as:
 
 ```
-reward = (old_drift_score − new_drift_score) × α  +  violation_penalty  +  success_bonus
+drift_score = remaining_drift_items / drift_items_at_reset      (capped at 1.0)
+reward      = (old_drift_score − new_drift_score)  +  success_bonus
 ```
 
 | Term | Value | Condition |
 |------|-------|-----------|
-| Drift reduction | `(old_drift_score − new_drift_score) × α` | Positive when drift decreases. `α` is a scaling coefficient. |
-| Guardrail violation | `-1.0` | Any action that violates a guardrail constraint; episode terminates immediately. |
-| Success bonus | `+1.0` | Awarded when `drift_score == 0.0` (fully reconciled). |
-| Inefficiency penalty | Small negative per step | Optional; encourages shorter action sequences. |
+| Drift reduction | `old_drift_score − new_drift_score` | Positive when drift decreases (e.g. `+0.2` per fix on the 5-item hard task). |
+| Success bonus | `+1.0` | Awarded once, on the step where `drift_score` reaches `0.0`. |
+| Guardrail violation | `-1.0` | The action would break a guardrail; it is not applied and the episode ends. |
+| Rejected action | `-0.05` | Missing fields, unknown resource, or dependencies not yet reconciled. The step is still used up. |
+
+A perfect episode therefore earns a total of `2.0`. Episodes end on success, on a guardrail violation, or after 30 steps.
 
 > Note: See `server/IaCDriftReconciler_environment.py` for the exact reward calculation logic.
 
@@ -184,9 +187,9 @@ The environment ships with three pre-defined tasks of increasing difficulty. Eac
 
 | Task | Description | Key Challenge |
 |------|-------------|---------------|
-| **Easy** | Two resources have the wrong instance sizes. | Simple attribute updates with no resource dependencies. |
-| **Medium** | A security group rule was added manually outside Terraform (shadow resource). | Agent must decide whether to delete or import the unmanaged rule; the incorrect choice violates a guardrail constraint. |
-| **Hard** | Cascading drift: a missing EBS volume makes the instance-type drift unresolvable until the volume is created and attached first. | Agent must discover the dependency, sequence fixes correctly, and re-plan mid-episode. |
+| **Easy** | An instance has the wrong type and an S3 bucket has versioning off. | Simple attribute updates with no resource dependencies. |
+| **Medium** | SSH (port 22) is open on a security group, and a bastion instance exists but is not managed by Terraform (shadow resource). | Agent must close the port and decide whether to delete or import the bastion; deleting it violates a guardrail, importing it (`managed = true`) is correct. |
+| **Hard** | Five drifted network resources form a dependency chain (subnet, EIP → route table, NAT gateway → route). | Agent must fix resources in dependency order; acting on a resource before its dependencies are reconciled is rejected. |
 
 > Note: See the JSON files located inside `tasks/` directory for full representation of the task resources.
 
@@ -255,7 +258,7 @@ Then multiple clients can connect simultaneously:
 Test the environment logic directly without starting the HTTP server:
 
 ```bash
-python3 server/ia_cdrift_reconciler_environment.py
+python3 server/IaCDriftReconciler_environment.py
 ```
 
 This verifies that:
@@ -308,9 +311,37 @@ iac-drift-reconciler/
 │   ├── task_easy.json                      # Desired + actual state + guardrail constraints
 │   ├── task_medium.json
 │   └── task_hard.json
+├── tests/                                  # pytest suite (no network, fake LLM)
 ├── Dockerfile                              # Container image definition
 └── server/
     ├── __init__.py                         # Server module exports
-    ├── ia_cdrift_reconciler_environment.py # Core environment: step / reset / state / reward
+    ├── IaCDriftReconciler_environment.py   # Core environment: step / reset / state / reward
     └── app.py                              # FastAPI + WebSocket endpoints
 ```
+
+## Testing
+
+The test suite runs entirely in-process: no Docker, no network and no real LLM.
+
+```bash
+uv sync --extra dev   # installs pytest and pytest-cov into .venv
+uv run pytest         # run from this directory
+```
+
+| File | What it checks |
+|------|----------------|
+| `tests/test_environment.py` | Every task is solved by a scripted optimal action sequence (drift 0, success, no violation); reward sign and size; guardrail termination with `-1`; hard-task dependency order (reverse order never succeeds); reset isolation; max-steps termination. |
+| `tests/test_bugfixes.py` | One regression test per bug that was found and fixed (see the commit history). |
+| `tests/test_inference.py` | The agent loop with a fake LLM that returns good JSON, fenced JSON, prose-wrapped JSON and garbage. The fake environment sends observations through the same serialiser the real server uses, so tests see exactly what a deployed client sees. |
+| `tests/test_validate_and_server.py` | `validate_tasks.py` passes on the shipped tasks; the FastAPI app answers `/health` and `/tasks` and solves the easy task over WebSocket. |
+
+## Design decisions
+
+- **Guardrails are checked before an action is applied.** The environment applies the action to a deep copy of the state, checks the rules there, and only then touches the real state. A violating action is never applied; the episode ends with `-1`.
+- **Only the action that causes a violation is blamed.** A rule fires only if the action targets the guarded resource *and* changes the guarded value (or deletes the resource). A rule that is already broken at reset counts as drift to fix, not as a mistake by the agent.
+- **Dependencies are enforced, not just scored.** In the hard task, acting on a resource whose dependencies are not yet reconciled is rejected with a small penalty, so a wrong order cannot reach success.
+- **Every action uses a step, including rejected ones.** An agent stuck emitting bad actions still hits the 30-step limit, and stepping after the episode has ended changes nothing and earns nothing.
+- **`new_value` is always a string** and is converted to the type of the desired value. Only `"true"`/`"false"` become booleans, so a value like `"no"` cannot accidentally count as `true`.
+- **Observing the agent.** `inference.py` prints the evaluator's `[START]/[STEP]/[END]` lines on stdout, and a `[SUMMARY]` line per episode on stderr with steps, final drift, guardrail violations, rejected actions, parse errors and LLM errors. The OpenEnv server does not send `observation.metadata` to clients, so the loop works out each step's outcome from the reward (`-1.0` and done means a violation, `-0.05` means a rejected action).
+- **Scoring.** Task score is `1 − final drift_score`, clamped to the open interval (0, 1) as the hackathon validator requires. An episode that ends on a guardrail violation gets the minimum score, and success means drift reached 0 with no violation.
+- **Bounded prompts.** Each prompt already contains the full current drift list, so only the last 4 turns of history (`HISTORY_TURNS`) are sent to the model. The previous step's error is included in the next prompt so the model can correct itself.
