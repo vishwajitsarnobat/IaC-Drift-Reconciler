@@ -101,6 +101,10 @@ _DEFAULT_SEVERITY = "medium"
 
 _VALID_OPS = {"==", "!=", ">", ">=", "<", "<="}
 
+# Reward for an action the environment refuses (missing fields, unknown
+# resource, dependency not yet reconciled).  The action still uses up a step.
+REJECTED_ACTION_PENALTY: float = -0.05
+
 
 # Pure helper functions (module-level, no side-effects)
 
@@ -304,33 +308,15 @@ class IaCDriftReconcilerEnvironment(Environment):
                 },
             )
 
-        # ── 1. Field validation ────────────────────────────────────────
+        # ── 1. Action validation (fields + target resource) ────────────
         valid, field_err = self._validate_action_fields(action)
         if not valid:
-            return self._make_obs(
-                done=False,
-                metadata={
-                    "last_action_valid": False,
-                    "error": field_err,
-                    "reward": 0.0,
-                    "step": self.step_count,
-                },
-            )
+            return self._reject(field_err)
 
         # ── 2. Dependency ordering ─────────────────────────────────────
         dep_ok, dep_err = self._check_dependency_order(action)
         if not dep_ok:
-            self.step_count += 1
-            self._done = self.step_count >= MAX_STEPS
-            return self._make_obs(
-                done=self._done,
-                metadata={
-                    "last_action_valid": False,
-                    "error": dep_err,
-                    "reward": -0.05,
-                    "step": self.step_count,
-                },
-            )
+            return self._reject(dep_err)
 
         # ── 3. Guardrail pre-flight on projected state ─────────────────
         violated, violated_rule = self._check_guardrail_violation(action)
@@ -380,6 +366,21 @@ class IaCDriftReconcilerEnvironment(Environment):
             meta["apply_warning"] = apply_warn
 
         return self._make_obs(done=done, metadata=meta)
+
+    def _reject(self, error: str) -> IaCDriftReconcilerObservation:
+        """Refuse an action: state is untouched, but the step is used up and
+        a small penalty is given, so a looping agent still hits MAX_STEPS."""
+        self.step_count += 1
+        self._done = self.step_count >= MAX_STEPS
+        return self._make_obs(
+            done=self._done,
+            metadata={
+                "last_action_valid": False,
+                "error": error,
+                "reward": REJECTED_ACTION_PENALTY,
+                "step": self.step_count,
+            },
+        )
 
     @property
     def state(self) -> State:
@@ -460,12 +461,35 @@ class IaCDriftReconcilerEnvironment(Environment):
     def _validate_action_fields(
         self, action: IaCDriftReconcilerAction
     ) -> Tuple[bool, str]:
-        required = _ACTION_REQUIRED.get(action.action_type, [])
+        t = action.action_type
+        required = _ACTION_REQUIRED.get(t, [])
         missing  = [f for f in required if getattr(action, f, None) is None]
         if missing:
             return False, (
-                f"Action '{action.action_type}' missing required fields: {missing}"
+                f"Action '{t}' missing required fields: {missing}"
             )
+
+        # The target must exist (or, for create, must not exist yet).
+        if t in ("update_resource", "delete_extra_resource"):
+            if action.resource_name not in self.actual_state:
+                return False, f"{t}: unknown resource '{action.resource_name}'"
+        elif t in ("attach_volume", "detach_volume"):
+            if action.instance_name not in self.actual_state:
+                return False, f"{t}: unknown instance '{action.instance_name}'"
+        elif t == "create_missing_resource":
+            if action.resource_name in self.actual_state:
+                return False, (
+                    f"create_missing_resource: '{action.resource_name}' already exists"
+                )
+            try:
+                props = json.loads(action.properties)
+            except (json.JSONDecodeError, TypeError):
+                props = None
+            if not isinstance(props, dict):
+                return False, (
+                    "create_missing_resource: properties must be a JSON object "
+                    'string, e.g. \'{"domain": "vpc"}\''
+                )
         return True, ""
 
     # ── _check_dependency_order ────────────────────────────────────────
